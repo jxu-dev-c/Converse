@@ -33,7 +33,7 @@ export async function signUp(
       role,
     });
     const luciaCookie = lucia.createSessionCookie(session.id);
-    await cookies().set(luciaCookie.name, luciaCookie.value, luciaCookie.attributes);
+    await (await cookies()).set(luciaCookie.name, luciaCookie.value, luciaCookie.attributes);
     return res;
   } catch (err: any) {
     console.log(err);

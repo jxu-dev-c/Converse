@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { logIn } from "@/app/_controller/user";
 import { UserType } from "@/app/_schema/user";
 
-export const POST = async (req: NextRequest, res: NextResponse) => {
+export const POST = async (req: NextRequest) => {
   // 1. compare password
   // if password is correct
   //   TODO

@@ -8,7 +8,7 @@ export const lucia = new Lucia(adapter, {
     expires: false,
     attributes: {
       // set to `true` when using HTTPS
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
     },
   },
 });
@@ -22,7 +22,7 @@ declare module "lucia" {
 
 
 export const purgeRemainingSessions = async () => {
-  const oldCookie = cookies()?.get(lucia?.sessionCookieName)?.value;
+  const oldCookie = (await cookies())?.get(lucia?.sessionCookieName)?.value;
   if (!oldCookie) return;
   await lucia.invalidateSession(oldCookie);
 }

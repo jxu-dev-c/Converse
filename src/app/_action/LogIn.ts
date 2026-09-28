@@ -35,7 +35,7 @@ export async function logIn(prevState: any, formData: FormData) {
     role: userRole,
   });
   const luciaCookie = lucia.createSessionCookie(session.id);
-  await cookies().set(
+  await (await cookies()).set(
     luciaCookie.name,
     luciaCookie.value,
     luciaCookie.attributes

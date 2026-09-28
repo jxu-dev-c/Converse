@@ -13,12 +13,12 @@ export async function SignOut(): Promise<returnData> {
   } catch (error) {
     return { userOutput: null, status: 500 } as returnData;
   }
-  if (cookies().get("lastAuth")) {
-    cookies().delete("lastAuth");
+  if ((await cookies()).get("lastAuth")) {
+    (await cookies()).delete("lastAuth");
   }
   if (result.session) {
-    lucia.invalidateSession(result.session.id);
-    cookies().set(emptyCookie.name, emptyCookie.value, emptyCookie.attributes);
+    await lucia.invalidateSession(result.session.id);
+    (await cookies()).set(emptyCookie.name, emptyCookie.value, emptyCookie.attributes);
   } else {
     return { userOutput: null, status: 401 } as returnData;
   }
