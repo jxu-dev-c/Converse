@@ -121,3 +121,21 @@ input.breathing {
 html.dark .log-in-bg {
   filter: invert(1);
 }
+
+.activity-shimmer {
+  background: linear-gradient(100deg, #71717a 30%, #d4d4d8 50%, #71717a 70%);
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: activity-shimmer 2s linear infinite;
+}
+.dark .activity-shimmer {
+  background-image: linear-gradient(100deg, #a1a1aa 30%, #f4f4f5 50%, #a1a1aa 70%);
+}
+@keyframes activity-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .activity-shimmer { animation: none; -webkit-text-fill-color: currentColor; }
+}

@@ -1,3 +1,4 @@
+import { Marked, type Token } from "marked";
 import { z } from "zod";
 import type { ChatMessage } from "./types";
 
@@ -37,5 +38,16 @@ export function createCitationRegistry(history: ChatMessage[]): CitationRegistry
 }
 
 export function citedRefs(text: string): number[] {
-  return [...new Set(Array.from(text.matchAll(/\[(\d+)\](?!\()/g), match => Number(match[1])))];
+  const refs = new Set<number>();
+  function visit(tokens: Token[]) {
+    for (const token of tokens) {
+      if (["code", "codespan", "link", "image", "html"].includes(token.type)) continue;
+      if ("tokens" in token && Array.isArray(token.tokens)) visit(token.tokens);
+      else if (token.type === "list") for (const item of token.items) visit(item.tokens);
+      else if (token.type === "table") for (const row of [token.header, ...token.rows]) for (const cell of row) visit(cell.tokens);
+      else if (token.type === "text") for (const match of token.text.matchAll(/\[(\d+)\](?!\()/g)) refs.add(Number(match[1]));
+    }
+  }
+  visit(new Marked().lexer(text));
+  return [...refs];
 }

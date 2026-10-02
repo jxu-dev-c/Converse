@@ -28,3 +28,9 @@ it("returns not found for another user's chat and refuses active deletion", asyn
   mocks.delete.mockResolvedValue(-1);
   expect((await DELETE(request("DELETE"), context)).status).toBe(409);
 });
+
+it("rate limits management routes", async () => {
+  mocks.limit.mockResolvedValue({ success: false, reset: Date.now() + 1000 });
+  expect((await PATCH(request("PATCH", { title: "Title" }), context)).status).toBe(429);
+  expect((await DELETE(request("DELETE"), context)).status).toBe(429);
+});
