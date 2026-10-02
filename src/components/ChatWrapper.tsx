@@ -1,82 +1,57 @@
 "use client";
-import { useEffect, useState, useContext } from "react";
-import { useChat } from "ai/react";
+import { useState, type FormEvent } from "react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import { type ChatMessage } from "@/app/lib/chat/types";
 import { Messages } from "./Messages";
 import NavBar from "@/components/navBar";
 import ChatInput from "./ChatInput";
-import { UIContext } from "@/app/_context/ChatContext";
 
+const transport = new DefaultChatTransport<ChatMessage>({
+  api: "/api/chat",
+  prepareSendMessagesRequest: ({ id, messages }) => ({ body: { id, message: messages.at(-1) } }),
+});
 
-
-export const ChatWrapper = ({
-  sessionId,
-  initialMessages,
-}: {
-  sessionId: string;
-  initialMessages: any[];
+export const ChatWrapper = ({ chatId, initialMessages }: {
+  chatId: string;
+  initialMessages: ChatMessage[];
 }) => {
-  // const [chatState, setChatState] = useState("Ready");
   const inputHeight = 55;
-  const { chatState, setChatState } = useContext(UIContext);
-  const {
-    messages,
-    handleInputChange,
-    handleSubmit,
-    input,
-    isLoading,
-    setMessages,
-  } = useChat({
-    api: "/api/chat-stream",
-    body: { sessionId },
-    initialMessages,
-    onResponse: (response) => {
-      setChatState("Loading");
-      console.log(response);
-    },
-    onError: () => {
-      setChatState("Error");
-    },
-    onFinish: () => {
-      setChatState("Finished");
-      // display sources if available
-    },
+  const [input, setInput] = useState("");
+  const { messages, sendMessage, status, error, setMessages, stop, clearError } = useChat<ChatMessage>({
+    id: chatId, messages: initialMessages, transport,
   });
-
-  const reload = () => {
-    setMessages([]);
+  const isLoading = status === "submitted" || status === "streaming";
+  const chatState = isLoading ? "Loading" : error ? "Error" : messages.length ? "Finished" : "Ready";
+  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (isLoading || !input.trim()) return;
+    void sendMessage({ text: input });
+    setInput("");
   };
 
-  useEffect(() => {
-    if (isLoading) {
-      setChatState("Loading");
-    }
-  }, [isLoading, setChatState]);
-
   return (
-    <div className="relative min-h-full dark:bg-zinc-800 bg-zinc-200 flex  flex-col justify-between">
-      <NavBar sessionId={sessionId} reloadChat={reload} />
+    <div className="relative min-h-full dark:bg-zinc-800 bg-zinc-200 flex flex-col justify-between">
+      <NavBar reloadChat={() => { setMessages([]); clearError(); }} isChatLoading={isLoading} />
       <div
-        className={`flex-1 text-black dark:bg-zinc-800 bg-gray-100 justify-between flex flex-col h-screen`}
-        style={{
-          paddingBottom: `${inputHeight * 1.3}px`,
-        }}
+        className="flex-1 text-black dark:bg-zinc-800 bg-gray-100 justify-between flex flex-col h-screen"
+        style={{ paddingBottom: `${inputHeight * 1.3}px` }}
       >
         <Messages messages={messages} />
       </div>
       <div
-        className={`w-full fixed bottom-0 left-0 right-0 bg-gray-100/75 dark:bg-zinc-800/75 backdrop-blur-md z-10`}
-        style={{
-          maxHeight: `${inputHeight * 1.3}px`,
-        }}
+        className="w-full fixed bottom-0 left-0 right-0 bg-gray-100/75 dark:bg-zinc-800/75 backdrop-blur-md z-10"
+        style={{ maxHeight: `${inputHeight * 1.3}px` }}
       >
         <div className="container mx-auto h-full">
-          {/* insert here */}
+          {error && <p role="alert" className="px-5 text-sm text-red-600">Unable to send your message. Please try again.</p>}
           <ChatInput
             chatState={chatState}
             input={input}
             inputHeight={inputHeight}
-            handleInputChange={handleInputChange}
-            handleSubmit={handleSubmit}
+            onInputChange={event => setInput(event.target.value)}
+            onSubmit={onSubmit}
+            onStop={() => { void stop(); }}
           />
         </div>
       </div>

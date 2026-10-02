@@ -38,11 +38,10 @@ export default function PasswordValidator(props: PasswordValidatorProps) {
   const pwdValue = props.password;
   const { setIsPWInvalid } = React.useContext(UIContext);
   const validationResult = schema.validate(pwdValue, { details: true });
-  if (validationResult.length === 0) {
-    setIsPWInvalid(false);
-  } else {
-    setIsPWInvalid(true);
-  }
+  const isInvalid = validationResult.length > 0;
+  React.useEffect(() => {
+    setIsPWInvalid(isInvalid);
+  }, [isInvalid, setIsPWInvalid]);
   return (
     <div className="flex flex-col items-center justify-start">
       <div className="text-xl">

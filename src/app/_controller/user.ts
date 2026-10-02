@@ -137,7 +137,5 @@ export const getUserbyId = async (uuid: string) => {
       "#role": "role",
     },
   });
-  const response = await docClient.send(command);
-  console.log("USR-response", response);
-  return response;
+  return docClient.send(command);
 };
