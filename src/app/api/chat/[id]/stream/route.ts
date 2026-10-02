@@ -4,7 +4,7 @@ import { guardChatRequest } from "@/app/lib/chat/http";
 import { chatIdSchema } from "@/app/lib/chat/types";
 import { getChat } from "@/app/lib/chat/store";
 import { streamContext } from "@/app/lib/chat/stream";
-export const maxDuration = 120;
+export const maxDuration = 60;
 export async function GET(req: NextRequest, context: { params: Promise<{ id: string }> }) {
   const guard = await guardChatRequest(req);
   if (guard.response) return guard.response;

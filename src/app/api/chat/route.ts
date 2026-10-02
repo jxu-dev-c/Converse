@@ -11,7 +11,7 @@ import {
   generateId, toUIMessageStream, validateUIMessages,
 } from "ai";
 import { type NextRequest } from "next/server";
-export const maxDuration = 120;
+export const maxDuration = 60;
 const genericError = "Unable to complete the response. Please try again.";
 
 export async function POST(req: NextRequest) {
