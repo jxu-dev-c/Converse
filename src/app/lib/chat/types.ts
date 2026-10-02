@@ -7,6 +7,7 @@ export const sourceSchema = z.object({ id: z.string(), score: z.number() });
 export type ChatSource = z.infer<typeof sourceSchema>;
 export const messageMetadataSchema = z.object({
   sources: z.array(sourceSchema).optional(),
+  reasoningMs: z.number().nonnegative().optional(),
 });
 export type ChatTools = InferUITools<ReturnType<typeof createSearchTools>>;
 export type ChatMessage = UIMessage<z.infer<typeof messageMetadataSchema>, never, ChatTools>;

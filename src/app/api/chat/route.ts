@@ -1,20 +1,18 @@
 import { validateRequest } from "@/app/_auth/validate-request";
-import { mergeIncoming, selectHistoryWindow } from "@/app/lib/chat/context";
-import { chatModel, providerOptions } from "@/app/lib/chat/model";
-import { INSTRUCTIONS } from "@/app/lib/chat/prompts";
-import { createSearchTools } from "@/app/lib/chat/retrieval";
+import { mergeIncoming, prepareHistory } from "@/app/lib/chat/context";
+import { converseAgent } from "@/app/lib/chat/agent";
 import { clearChat, loadChat, saveChat } from "@/app/lib/chat/store";
-import { chatRequestSchema, messageMetadataSchema, type ChatMessage, type ChatSource } from "@/app/lib/chat/types";
+import { chatRequestSchema, messageMetadataSchema, type ChatMessage } from "@/app/lib/chat/types";
 import { redis } from "@/app/lib/redis";
 import { Ratelimit } from "@upstash/ratelimit";
 import {
   convertToModelMessages, createIdGenerator, createUIMessageStreamResponse,
-  stepCountIs, streamText, toUIMessageStream, validateUIMessages,
+  toUIMessageStream, validateUIMessages,
 } from "ai";
 import { type NextRequest } from "next/server";
 import { verifyRequestOrigin } from "lucia";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 const ratelimit = new Ratelimit({
   redis, limiter: Ratelimit.slidingWindow(10, "10 s"), prefix: "converse:chat:ratelimit",
 });
@@ -42,40 +40,20 @@ export async function POST(req: NextRequest) {
   const { id, message } = parsed.data;
 
   try {
-    const sources = new Map<string, ChatSource>();
-    const tools = createSearchTools(found => {
-      for (const source of found) {
-        if (source.score > (sources.get(source.id)?.score ?? -Infinity)) sources.set(source.id, source);
-      }
-    });
+    const tools = converseAgent.tools;
     const merged = await validateUIMessages<ChatMessage>({
       messages: mergeIncoming(await loadChat(user.id, id), message),
       metadataSchema: messageMetadataSchema.optional(),
       tools,
     });
-    const window = selectHistoryWindow(merged);
+    const window = prepareHistory(merged);
 
-    const result = streamText({
-      model: chatModel,
-      instructions: INSTRUCTIONS,
+    const result = await converseAgent.stream({
       messages: await convertToModelMessages(window, { tools, ignoreIncompleteToolCalls: true }),
-      tools,
-      toolChoice: "auto",
-      stopWhen: stepCountIs(4),
-      // Reserve the fourth step for an answer after up to three search rounds.
-      prepareStep: ({ stepNumber }) => stepNumber >= 3 ? { toolChoice: "none", activeTools: [] } : undefined,
-      maxOutputTokens: 1024,
-      providerOptions,
-      onEnd: ({ providerMetadata }) => {
-        if (process.env.NODE_ENV === "development") {
-          console.info("DeepSeek cache", {
-            promptCacheHitTokens: providerMetadata?.deepseek?.promptCacheHitTokens,
-          });
-        }
-      },
-      // Avoid the SDK's default logging of provider errors (which can include request details).
-      onError: () => console.error("Chat generation failed"),
+      abortSignal: req.signal,
     });
+    const reasoningStarts = new Map<string, number>();
+    let reasoningMs = 0;
     // Drain the provider independently; the UI stream's onEnd also runs on cancellation.
     void result.consumeStream({ onError: () => console.error("Chat stream consumption failed") });
     return createUIMessageStreamResponse({
@@ -84,8 +62,14 @@ export async function POST(req: NextRequest) {
         tools,
         originalMessages: merged,
         generateMessageId: createIdGenerator({ prefix: "msg", size: 16 }),
-        messageMetadata: ({ part }) => ["start", "tool-result", "finish"].includes(part.type)
-          ? { sources: [...sources.values()] } : undefined,
+        messageMetadata: ({ part }) => {
+          if (part.type === "reasoning-start") reasoningStarts.set(part.id, Date.now());
+          if (part.type === "reasoning-end") {
+            reasoningMs += Date.now() - (reasoningStarts.get(part.id) ?? Date.now());
+            reasoningStarts.delete(part.id);
+          }
+          return ["start", "reasoning-end", "finish"].includes(part.type) ? { reasoningMs } : undefined;
+        },
         onEnd: async ({ messages }) => {
           await saveChat(user.id, messages, id);
         },

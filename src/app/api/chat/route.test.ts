@@ -122,7 +122,7 @@ it("streams without searching when the model does not call the tool", async () =
   const [userId, messages, chatId] = mocks.save.mock.calls[0] as [string, ChatMessage[], string];
   expect([userId, chatId]).toEqual(["stable-user", "default"]);
   expect(messages.slice(0, 3)).toEqual([...history, question]);
-  expect(messages[3].metadata).toEqual({ sources: [] });
+  expect(messages[3].metadata).toEqual({ reasoningMs: 0 });
   expect(new Set(messages.map(message => message.id)).size).toBe(4);
   expect(JSON.stringify(messages)).not.toContain("reference_material");
   expect(mocks.query).not.toHaveBeenCalled();
@@ -149,7 +149,7 @@ it("executes the model's query, streams its answer, and persists evidence for fo
     type: "tool-searchDrugLabels", state: "output-available", input: { query: "ibuprofen uses" },
     output: { docs: ["Ibuprofen label evidence"], sources: [{ id: "label-id", score: 0.8 }] },
   }));
-  expect(stored[1].metadata).toEqual({ sources: [{ id: "label-id", score: 0.8 }] });
+  expect(stored[1].metadata).toEqual({ reasoningMs: 0 });
 
   mocks.load.mockResolvedValue(stored);
   const followUp = { ...question, id: "follow-up", parts: [{ type: "text", text: "Can you repeat its uses?" }] };
@@ -172,7 +172,7 @@ it("aggregates and deduplicates sources from multiple searches", async () => {
   expect(mocks.query).toHaveBeenCalledTimes(2);
   expect(mocks.stream).toHaveBeenCalledTimes(3);
   const assistant = (mocks.save.mock.calls[0][1] as ChatMessage[]).at(-1)!;
-  expect(assistant.metadata).toEqual({ sources: [{ id: "label-id", score: 0.9 }, { id: "warnings", score: 0.7 }] });
+  expect(assistant.metadata).toEqual({ reasoningMs: 0 });
   expect(assistant.parts.filter(part => part.type === "tool-searchDrugLabels")).toHaveLength(2);
 });
 
@@ -212,7 +212,7 @@ it.each([false, true])("lets the model answer when search is empty or unavailabl
     expect(mocks.stream).toHaveBeenCalledTimes(2);
     const output = JSON.stringify(mocks.stream.mock.calls[1][0].prompt);
     expect(output.includes("Search unavailable")).toBe(failure);
-    expect((mocks.save.mock.calls[0][1] as ChatMessage[]).at(-1)!.metadata).toEqual({ sources: [] });
+    expect((mocks.save.mock.calls[0][1] as ChatMessage[]).at(-1)!.metadata).toEqual({ reasoningMs: 0 });
   } finally { log.mockRestore(); }
 });
 
@@ -234,7 +234,7 @@ it("persists a partial assistant response and retrieved sources when the client 
   expect(messages[0]).toEqual(question);
   const text = messages.at(-1)!.parts.filter(part => part.type === "text").map(part => part.text).join("");
   expect(text).toBe("Ibuprofen ");
-  expect(messages.at(-1)!.metadata).toEqual({ sources: [{ id: "label-id", score: 0.8 }] });
+  expect(messages.at(-1)!.metadata).toEqual({ reasoningMs: 0 });
 });
 
 it("resumes a conversation cancelled during tool input without an unmatched tool call", async () => {

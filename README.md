@@ -6,7 +6,7 @@ Converse is a research chatbot over openFDA OTC drug labels. It retrieves refere
 
 - Next.js 16 (App Router, Turbopack, `proxy.ts`), React 19, Node 24
 - AI SDK 7, `@ai-sdk/react` 4, `@ai-sdk/deepseek` 3
-- DeepSeek `deepseek-v4-flash`, with thinking disabled and model-controlled search
+- DeepSeek `deepseek-v4-flash`, with thinking enabled (high effort) and model-controlled search
 - Upstash Vector with hosted embeddings, Redis history, and per-user rate limits
 - Existing Lucia / AWS DynamoDB authentication
 - NextUI, Tailwind CSS, and sanitized Markdown rendering with marked / DOMPurify
@@ -79,3 +79,5 @@ Follow-ups: migrate NextUI to HeroUI and review the unused `/api/auth` route. Lu
 
 ![Converse chat](https://github.com/user-attachments/assets/32685c04-8452-480f-ab1b-61a981193bf5)
 ![Converse UI](https://github.com/user-attachments/assets/295bd460-0b15-443f-a72c-de28ce9aa8a1)
+
+Reasoning is persisted for display, but stripped from outgoing history. History is bounded to 40 messages / approximately 12k tokens; tool evidence older than three user turns is dropped. The agent reserves step four for an answer, with a 4096-token output budget.

@@ -34,7 +34,6 @@ export function createSearchTools(onSources: (sources: ChatSource[]) => void = (
         try {
           const result = await retrieveContext(query);
           onSources(result.sources);
-          if (process.env.NODE_ENV === "development") console.info("Chat retrieval", { query, sources: result.sources });
           return result;
         } catch {
           console.error("Chat search failed");
