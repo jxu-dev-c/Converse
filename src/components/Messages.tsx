@@ -1,13 +1,14 @@
-import type { UIMessage } from "ai";
+import type { ChatMessage } from "@/app/lib/chat/types";
 import { Message } from "./Message";
 import { Icon } from "@iconify/react";
 import { useEffect, useRef } from "react";
 
 interface MessageProps {
-  messages: UIMessage[];
+  messages: ChatMessage[];
+  isStreaming?: boolean;
 }
 
-export const Messages = ({ messages }: MessageProps) => {
+export const Messages = ({ messages, isStreaming = false }: MessageProps) => {
   const messagesContainer = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // check the y-axis of the last message,
@@ -33,10 +34,11 @@ export const Messages = ({ messages }: MessageProps) => {
         ref={messagesContainer}
       >
         {messages.length > 0 ? (
-          messages.map((message) => (
+          messages.map((message, index) => (
             <Message
               key={message.id}
               message={message}
+              isStreaming={isStreaming && message.role === "assistant" && index === messages.length - 1}
             />
           ))
         ) : (
