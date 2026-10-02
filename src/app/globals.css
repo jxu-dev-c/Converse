@@ -2,21 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
-  --background-end-rgb: 255, 255, 255;
-}
 ::-ms-reveal {
   display: none;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --foreground-rgb: 255, 255, 255;
-    --background-start-rgb: 0, 0, 0;
-    --background-end-rgb: 0, 0, 0;
-  }
 }
 
 html {
@@ -26,10 +13,9 @@ html {
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
   height: 100%;
   width: 100%;
-  @apply dark:bg-zinc-800 bg-zinc-200 dark:text-white;
+  @apply dark:bg-zinc-800 bg-zinc-200 text-zinc-900 dark:text-white;
 }
 
 [data-overlay-container] {
