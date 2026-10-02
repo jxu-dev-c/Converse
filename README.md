@@ -85,3 +85,5 @@ Reasoning is persisted for display, but stripped from outgoing history. History 
 Label search assigns conversation-wide citation numbers and includes optional drug/manufacturer titles. Answers render sanitized inline citation chips and a Sources footer. PR #9 tool output remains readable.
 
 Reasoning and search traces share an activity block. It opens while the agent works and collapses when answer text begins; saved messages can be expanded for inspection.
+
+Chats live at `/chat/{id}`; `/chat` starts an empty conversation. Each user has `chat:{userId}:{chatId}` messages, a `:meta` hash, and `chats:{userId}` sorted index capped at 100 chats. Message/meta TTLs refresh for 30 days on save. Existing default histories are backfilled into the sidebar. Titles are generated with thinking disabled. All chat HTTP routes share authentication, origin and rate-limit checks; active chats cannot be deleted.

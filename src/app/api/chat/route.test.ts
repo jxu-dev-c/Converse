@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { simulateReadableStream, type MockLanguageModelV4 } from "ai/test";
 import type { ChatMessage } from "@/app/lib/chat/types";
-import { POST, DELETE } from "./route";
+import { POST } from "./route";
 
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(), limit: vi.fn(), load: vi.fn(), save: vi.fn(), clear: vi.fn(),
-  query: vi.fn(), stream: vi.fn(),
+  query: vi.fn(), stream: vi.fn(), touch: vi.fn(), rename: vi.fn(), title: vi.fn(),
 }));
 vi.mock("@/app/_auth/validate-request", () => ({ validateRequest: mocks.auth }));
 vi.mock("@/app/lib/redis", () => ({ redis: {} }));
@@ -14,7 +14,8 @@ vi.mock("@upstash/ratelimit", () => ({ Ratelimit: class {
   static slidingWindow() { return {}; }
   limit = mocks.limit;
 } }));
-vi.mock("@/app/lib/chat/store", () => ({ loadChat: mocks.load, saveChat: mocks.save, clearChat: mocks.clear }));
+vi.mock("@/app/lib/chat/store", () => ({ loadChat: mocks.load, saveChat: mocks.save, touchChat: mocks.touch, renameChat: mocks.rename }));
+vi.mock("@/app/lib/chat/title", () => ({ generateTitle: mocks.title }));
 vi.mock("@upstash/vector", () => ({ Index: class {
   static fromEnv() { return { query: mocks.query }; }
 } }));
@@ -62,6 +63,8 @@ beforeEach(() => {
   mocks.query.mockResolvedValue([{ id: "label-id", score: 0.8, data: "Ibuprofen label evidence" }]);
   mocks.stream.mockImplementation(() => textStream());
   mocks.save.mockResolvedValue(undefined);
+  mocks.touch.mockResolvedValue(false);
+  mocks.title.mockResolvedValue("Ibuprofen label uses");
 });
 
 describe("chat API boundaries", () => {
@@ -76,13 +79,13 @@ describe("chat API boundaries", () => {
   });
   it("uses the browser-facing host rather than the Next bind address for both methods", async () => {
     mocks.auth.mockResolvedValue({ user: null });
-    for (const method of ["POST", "DELETE"]) {
+    for (const method of ["POST"]) {
       const req = new NextRequest("http://0.0.0.0:3000/api/chat", {
         method, headers: { host: "localhost:3000", origin: "http://localhost:3000" },
       });
-      expect((await (method === "POST" ? POST(req) : DELETE(req))).status).toBe(401);
+      expect((await POST(req)).status).toBe(401);
       req.headers.set("origin", "https://foreign.example");
-      expect((await (method === "POST" ? POST(req) : DELETE(req))).status).toBe(403);
+      expect((await POST(req)).status).toBe(403);
     }
   });
   it("rate limits by the stable user ID", async () => {
@@ -94,7 +97,7 @@ describe("chat API boundaries", () => {
     expect(mocks.load).not.toHaveBeenCalled();
   });
   it.each([
-    { id: "other", message: question },
+    { id: "../other", message: question },
     { id: "default", message: { ...question, role: "system" } },
     { id: "default", message: { ...question, parts: [{ type: "text", text: " " }] } },
     { id: "default", message: { ...question, parts: [{ type: "text", text: "x".repeat(3001) }] } },
@@ -273,12 +276,26 @@ it("resumes a conversation cancelled during tool input without an unmatched tool
   expect(JSON.stringify(mocks.stream.mock.calls[2][0].prompt)).not.toContain('"toolCallId":"pending"');
 });
 
-it("authenticates and origin-checks deletion", async () => {
-  const req = new NextRequest("http://localhost:3000/api/chat", { method: "DELETE" });
-  expect((await DELETE(req)).status).toBe(200);
-  expect(mocks.clear).toHaveBeenCalledWith("stable-user");
-  mocks.auth.mockResolvedValue({ user: null });
-  expect((await DELETE(req)).status).toBe(401);
-  const foreign = new NextRequest("http://localhost:3000/api/chat", { method: "DELETE", headers: { origin: "https://foreign.example" } });
-  expect((await DELETE(foreign)).status).toBe(403);
+
+it("accepts any valid chat ID and emits a transient title only for the first message", async () => {
+  mocks.touch.mockResolvedValueOnce(true);
+  const first = await (await POST(request({ id: "chat_123", message: question }))).text();
+  expect(first).toContain('"type":"data-title"');
+  expect(first).toContain('"transient":true');
+  expect(mocks.rename).toHaveBeenCalledWith("stable-user", "chat_123", "Ibuprofen label uses");
+  expect(JSON.stringify(mocks.save.mock.calls[0][1])).not.toContain("data-title");
+  expect(await (await POST(request())).text()).not.toContain("data-title");
+});
+it("persists reasoning but strips it from outgoing history", async () => {
+  mocks.stream.mockResolvedValueOnce(modelStream([
+    { type: "reasoning-start", id: "r" }, { type: "reasoning-delta", id: "r", delta: "Think about evidence" }, { type: "reasoning-end", id: "r" },
+    { type: "text-start", id: "t" }, { type: "text-delta", id: "t", delta: "answer" }, { type: "text-end", id: "t" },
+  ]));
+  await (await POST(request())).text();
+  const stored = mocks.save.mock.calls[0][1] as ChatMessage[];
+  expect(stored.at(-1)?.parts).toContainEqual(expect.objectContaining({ type: "reasoning", text: "Think about evidence" }));
+  expect(stored.at(-1)?.metadata?.reasoningMs).toBeGreaterThanOrEqual(0);
+  mocks.load.mockResolvedValue(stored);
+  await (await POST(request({ id: "default", message: { ...question, id: "next" } }))).text();
+  expect(JSON.stringify(mocks.stream.mock.calls[1][0].prompt)).not.toContain("Think about evidence");
 });
