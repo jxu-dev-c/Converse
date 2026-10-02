@@ -2,13 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { simulateReadableStream, type MockLanguageModelV4 } from "ai/test";
 import type { ChatMessage } from "@/app/lib/chat/types";
+import { OFF_TOPIC_REPLY } from "@/app/lib/chat/prompts";
 import { POST } from "./route";
 
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(), limit: vi.fn(), load: vi.fn(), save: vi.fn(), clear: vi.fn(),
+  offTopic: vi.fn(),
   query: vi.fn(), stream: vi.fn(), touch: vi.fn(), rename: vi.fn(), title: vi.fn(), get: vi.fn(), begin: vi.fn(), subscribe: vi.fn(), unsubscribe: vi.fn(), stop: vi.fn(),
 }));
 vi.mock("@/app/_auth/validate-request", () => ({ validateRequest: mocks.auth }));
+vi.mock("@/app/lib/chat/guardrail", () => ({ isOffTopic: mocks.offTopic }));
 vi.mock("@/app/lib/redis", () => ({ redis: {} }));
 vi.mock("@upstash/ratelimit", () => ({ Ratelimit: class {
   static slidingWindow() { return {}; }
@@ -61,6 +64,7 @@ beforeEach(() => {
   mocks.auth.mockResolvedValue({ user: { id: "stable-user" } });
   mocks.limit.mockResolvedValue({ success: true, reset: Date.now() + 10_000 });
   mocks.load.mockResolvedValue([]);
+  mocks.offTopic.mockResolvedValue(false);
   mocks.query.mockResolvedValue([{ id: "label-id", score: 0.8, data: "Ibuprofen label evidence" }]);
   mocks.stream.mockImplementation(() => textStream());
   mocks.save.mockResolvedValue(undefined);
@@ -76,11 +80,13 @@ describe("chat API boundaries", () => {
   it("rejects a foreign origin before auth or provider access", async () => {
     expect((await POST(request(undefined, "https://foreign.example"))).status).toBe(403);
     expect(mocks.auth).not.toHaveBeenCalled();
+    expect(mocks.offTopic).not.toHaveBeenCalled();
   });
   it("returns 401 when unauthenticated", async () => {
     mocks.auth.mockResolvedValue({ user: null });
     expect((await POST(request())).status).toBe(401);
     expect(mocks.limit).not.toHaveBeenCalled();
+    expect(mocks.offTopic).not.toHaveBeenCalled();
   });
   it("uses the browser-facing host rather than the Next bind address for both methods", async () => {
     mocks.auth.mockResolvedValue({ user: null });
@@ -100,6 +106,7 @@ describe("chat API boundaries", () => {
     expect(response.headers.get("retry-after")).toBeTruthy();
     expect(mocks.limit).toHaveBeenCalledWith("stable-user");
     expect(mocks.load).not.toHaveBeenCalled();
+    expect(mocks.offTopic).not.toHaveBeenCalled();
   });
   it.each([
     { id: "../other", message: question },
@@ -110,11 +117,68 @@ describe("chat API boundaries", () => {
   ])("rejects invalid or forged input: %j", async body => {
     expect((await POST(request(body))).status).toBe(400);
     expect(mocks.load).not.toHaveBeenCalled();
+    expect(mocks.offTopic).not.toHaveBeenCalled();
   });
   it("returns 400 for malformed JSON", async () => {
     const req = new NextRequest("http://localhost:3000/api/chat", { method: "POST", body: "{" });
     expect((await POST(req)).status).toBe(400);
+    expect(mocks.offTopic).not.toHaveBeenCalled();
   });
+});
+
+it("streams a refusal without model access or any persistence", async () => {
+  mocks.offTopic.mockResolvedValue(true);
+  const response = await POST(request());
+  expect(response.status).toBe(200);
+  expect(response.headers.get("x-vercel-ai-ui-message-stream")).toBe("v1");
+  const chunks = (await response.text()).split("\n\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6)));
+  expect(chunks).toEqual([
+    { type: "start", messageId: expect.stringMatching(/^msg/) },
+    { type: "text-start", id: expect.any(String) },
+    { type: "text-delta", id: expect.any(String), delta: OFF_TOPIC_REPLY },
+    { type: "text-end", id: expect.any(String) },
+    { type: "finish" },
+  ]);
+  expect(new Set(chunks.slice(1, 4).map(chunk => chunk.id)).size).toBe(1);
+  for (const mock of [mocks.stream, mocks.query, mocks.save, mocks.touch, mocks.title, mocks.rename, mocks.begin, mocks.subscribe, mocks.get, mocks.stop]) expect(mock).not.toHaveBeenCalled();
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, []);
+});
+
+it("audits retries against only history preceding the edited message and leaves stored history intact when blocked", async () => {
+  const history: ChatMessage[] = [
+    { id: "earlier", role: "user", parts: [{ type: "text", text: "Earlier question" }] },
+    { id: "earlier-answer", role: "assistant", parts: [{ type: "text", text: "Earlier answer" }] },
+    question,
+    { id: "answer", role: "assistant", parts: [{ type: "text", text: "Later answer" }] },
+  ];
+  mocks.load.mockResolvedValue(history);
+  mocks.offTopic.mockResolvedValue(true);
+  await (await POST(request())).text();
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history.slice(0, 2));
+  expect(history).toHaveLength(4);
+  expect(mocks.save).not.toHaveBeenCalled();
+});
+
+it("loads freshly persisted partial output after stopping a previous producer", async () => {
+  const history: ChatMessage[] = [{ id: "earlier", role: "user", parts: [{ type: "text", text: "Earlier question" }] }];
+  const partial: ChatMessage = { id: "partial", role: "assistant", parts: [{ type: "text", text: "Partial answer" }] };
+  mocks.get.mockResolvedValue({ meta: { activeStreamId: "old" } });
+  mocks.load.mockResolvedValueOnce(history).mockResolvedValueOnce([...history, partial]);
+  await (await POST(request())).text();
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history);
+  expect(mocks.save.mock.calls[0][1].slice(0, 3)).toEqual([...history, partial, question]);
+  expect(mocks.stop).toHaveBeenCalledBefore(mocks.begin);
+});
+
+it("preserves a previous answer that finishes during the audit", async () => {
+  const history: ChatMessage[] = [{ id: "earlier", role: "user", parts: [{ type: "text", text: "Earlier question" }] }];
+  const finished: ChatMessage = { id: "finished", role: "assistant", parts: [{ type: "text", text: "Finished answer" }] };
+  mocks.load.mockResolvedValue(history);
+  mocks.get.mockResolvedValue({ meta: {}, messages: [...history, finished] });
+  await (await POST(request())).text();
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history);
+  expect(mocks.save.mock.calls[0][1].slice(0, 3)).toEqual([...history, finished, question]);
+  expect(mocks.stop).not.toHaveBeenCalled();
 });
 
 it("streams without searching when the model does not call the tool", async () => {
@@ -125,6 +189,7 @@ it("streams without searching when the model does not call the tool", async () =
   mocks.load.mockResolvedValue(history);
   const response = await POST(request());
   expect(response.status).toBe(200);
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history);
   expect(response.headers.get("x-vercel-ai-ui-message-stream")).toBe("v1");
   expect(await response.text()).toContain("Ibuprofen ");
   const [userId, messages, chatId] = mocks.save.mock.calls[0] as [string, ChatMessage[], string];

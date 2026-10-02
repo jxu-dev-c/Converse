@@ -23,7 +23,7 @@ cp .env.example .env.local
 
 Fill in `.env.local` with a DeepSeek API key, the existing Upstash credentials, and the existing AWS / DynamoDB auth settings. The Vector index must contain OTC label text as `data` and support hosted embeddings. Auth also expects the existing `converse-sessions` table and `lucia-sessions-user-index` index. `.env.local` is gitignored; never commit credentials.
 
-`DEEPSEEK_MODEL` is optional and defaults to `deepseek-v4-flash`. `TOGETHER_AI_API_KEY` and `QSTASH_TOKEN` are no longer used. See [.env.example](.env.example) for all variable names.
+`DEEPSEEK_MODEL` is optional and defaults to `deepseek-v4-flash`. Set `OPENROUTER_API_KEY` for the Jev input guardrail; optional `JEV_MODEL` defaults to `jev-1.13`. `TOGETHER_AI_API_KEY` and `QSTASH_TOKEN` are no longer used. See [.env.example](.env.example) for all variable names.
 
 Set `MAINTENANCE_MODE=off` locally, then:
 
@@ -37,11 +37,13 @@ Open [localhost:3000](http://localhost:3000). `/` redirects to `/chat` when the 
 
 Maintenance is **on by default**: when `MAINTENANCE_MODE` is unset or has any value other than `off`, pages, auth actions, and API routes return the existing 503 maintenance response. Static Next.js assets remain accessible.
 
-For Vercel, add `DEEPSEEK_API_KEY`, optionally set `DEEPSEEK_MODEL`, and retain the Upstash and AWS variables. Keep `MAINTENANCE_MODE` unset until ready to reopen production; set it to `off` to enable the app. Remove the unused Together AI / QStash variables. The package pins Node 24 (`engines.node: "24.x"`), which Vercel uses over the project setting.
+For Vercel, add `DEEPSEEK_API_KEY` and `OPENROUTER_API_KEY`, optionally set `DEEPSEEK_MODEL` / `JEV_MODEL`, and retain the Upstash and AWS variables. `OPENROUTER_API_KEY` is currently configured only in Production; Preview fails open with a `missing_key` warning. Keep `MAINTENANCE_MODE` unset until ready to reopen production; set it to `off` to enable the app. Remove the unused Together AI / QStash variables. The package pins Node 24 (`engines.node: "24.x"`), which Vercel uses over the project setting.
 
 ## Conversation flow
 
 The client sends only `{ id, message }` to `POST /api/chat`. The server authenticates the user, rate-limits that user (10 requests per 10 seconds), loads their stored conversation, and merges the incoming message by ID. Retrying a stored question truncates that question and later messages before appending it again.
+
+Guardrail: before storing the incoming message or sending it to DeepSeek (including title generation), Jev audits it through [OpenRouter's System One API](https://openrouter.ai/docs/guides/community/typesafe-sdk). Medical questions and small talk pass. The last user/assistant text provides bounded context for follow-ups; tool outputs are excluded. An `off_topic` probability >=0.5 returns a fixed streamed refusal, and neither the question nor refusal is persisted. Missing credentials, HTTP errors, timeouts (3 seconds, no retries), and invalid responses fail open with reason-only warnings that contain no message text or credentials.
 
 The model sees a window starting on a user turn, bounded to 40 messages and approximately 12,000 tokens. Reasoning is persisted for display and removed from outgoing history. Tool evidence older than the latest three user turns is pruned. The agent receives its request registry through typed call options and `prepareCall`, which sets tool context (the installed SDK does not accept `toolsContext` directly in `.stream()`). The module-level agent has thinking enabled at high effort, a 4096-token output budget, and reserves step four for an answer after at most three searches.
 

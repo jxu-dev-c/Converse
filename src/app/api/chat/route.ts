@@ -1,6 +1,8 @@
 import { guardChatRequest } from "@/app/lib/chat/http";
 import { generateTitle } from "@/app/lib/chat/title";
 import { mergeIncoming, prepareHistory } from "@/app/lib/chat/context";
+import { isOffTopic } from "@/app/lib/chat/guardrail";
+import { OFF_TOPIC_REPLY } from "@/app/lib/chat/prompts";
 import { createCitationRegistry } from "@/app/lib/chat/citations";
 import { converseAgent } from "@/app/lib/chat/agent";
 import { beginStream, getChat, loadChat, saveChatIfActive, touchChat, renameChat } from "@/app/lib/chat/store";
@@ -13,6 +15,22 @@ import {
 import { type NextRequest } from "next/server";
 export const maxDuration = 60;
 const genericError = "Unable to complete the response. Please try again.";
+const messageId = createIdGenerator({ prefix: "msg", size: 16 });
+
+function refusalResponse() {
+  return createUIMessageStreamResponse({
+    stream: createUIMessageStream<ChatMessage>({
+      execute: ({ writer }) => {
+        const id = messageId();
+        writer.write({ type: "start", messageId: id });
+        writer.write({ type: "text-start", id });
+        writer.write({ type: "text-delta", id, delta: OFF_TOPIC_REPLY });
+        writer.write({ type: "text-end", id });
+        writer.write({ type: "finish" });
+      },
+    }),
+  });
+}
 
 export async function POST(req: NextRequest) {
   const guard = await guardChatRequest(req);
@@ -27,13 +45,19 @@ export async function POST(req: NextRequest) {
   let merged: ChatMessage[] = [];
   let claimed = false;
   try {
-    const previous = (await getChat(user.id, id))?.meta.activeStreamId;
+    const history = await loadChat(user.id, id);
+    let incoming = mergeIncoming(history, message);
+    if (await isOffTopic(message, incoming.slice(0, -1))) return refusalResponse();
+    const chat = await getChat(user.id, id);
+    const previous = chat?.meta.activeStreamId;
     if (previous && !await stopActiveStream(user.id, id, previous)) return new Response("Previous reply is still stopping. Please retry.", { status: 409 });
+    // The previous producer may finish during the audit, or persist partial output on stop.
+    incoming = mergeIncoming(previous ? await loadChat(user.id, id) : chat?.messages ?? history, message);
     const isNew = await touchChat(user.id, id);
     const title = isNew ? generateTitle(message.parts.map(part => part.text).join(""), controller.signal) : undefined;
     const tools = converseAgent.tools;
     merged = await validateUIMessages<ChatMessage>({
-      messages: mergeIncoming(await loadChat(user.id, id), message), metadataSchema: messageMetadataSchema.optional(), tools,
+      messages: incoming, metadataSchema: messageMetadataSchema.optional(), tools,
     });
     unsubscribe = await subscribe(`converse:stop:${streamId}`, () => controller.abort());
     claimed = await beginStream(user.id, id, streamId, merged);
@@ -41,7 +65,7 @@ export async function POST(req: NextRequest) {
     const reasoningStarts = new Map<string, number>();
     let reasoningMs = 0;
     const stream = createUIMessageStream<ChatMessage>({
-      originalMessages: merged, generateId: createIdGenerator({ prefix: "msg", size: 16 }),
+      originalMessages: merged, generateId: messageId,
       execute: async ({ writer }) => {
         const result = await converseAgent.stream({
           messages: await convertToModelMessages(prepareHistory(merged), { tools, ignoreIncompleteToolCalls: true }),
