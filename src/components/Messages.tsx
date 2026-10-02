@@ -1,11 +1,10 @@
-import { type Message as TMessage } from "ai/react";
+import type { UIMessage } from "ai";
 import { Message } from "./Message";
 import { Icon } from "@iconify/react";
 import { useEffect, useRef } from "react";
-import { ScrollShadow } from "@nextui-org/react";
 
 interface MessageProps {
-  messages: TMessage[];
+  messages: UIMessage[];
 }
 
 export const Messages = ({ messages }: MessageProps) => {
@@ -34,11 +33,10 @@ export const Messages = ({ messages }: MessageProps) => {
         ref={messagesContainer}
       >
         {messages.length > 0 ? (
-          messages.map((message, i) => (
+          messages.map((message) => (
             <Message
-              key={i}
-              content={message.content}
-              isUserMessage={message.role === "user"}
+              key={message.id}
+              message={message}
             />
           ))
         ) : (

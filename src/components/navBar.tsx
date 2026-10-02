@@ -1,51 +1,30 @@
-import { useState, useEffect, useContext } from "react";
-import { Button } from "@nextui-org/button";
-import { Tabs, Tab, Divider } from "@nextui-org/react";
-import { Trash2, Notebook, Cog, LogOut } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Tabs, Tab } from "@nextui-org/react";
 import { BrainCircuit } from "lucide-react";
 import { NightModeToggle } from "./NightModeToggle";
-import { UIContext } from "@/app/_context/ChatContext";
 import { clearChatHistory } from "@/app/lib/api";
-import { color, motion } from "framer-motion";
-import { Avatar } from "@nextui-org/react";
-import {
-  Dropdown,
-  DropdownTrigger,
-  DropdownMenu,
-  DropdownItem,
-  Spinner,
-} from "@nextui-org/react";
+import { motion } from "framer-motion";
 import NavDropDown from "./NavDropDown";
 
-// import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
-
-export default function Component({
-  sessionId,
-  reloadChat,
-}: {
-  sessionId: string;
-  reloadChat: any;
+export default function Component({ reloadChat, isChatLoading }: {
+  reloadChat: () => void;
+  isChatLoading: boolean;
 }) {
   const [mounted, setMounted] = useState(false);
   const [buttonLoading, setButtonLoading] = useState(false);
-  const [buttonLabel, setButtonLabel] = useState("Clear History");
-  const clearHistory = () => {
+  const [clearError, setClearError] = useState(false);
+  const clearHistory = async () => {
+    if (buttonLoading || isChatLoading) return;
     setButtonLoading(true);
-    setButtonLabel("Clearing...");
-    clearChatHistory(sessionId)
-      .then(() => {
-        setButtonLabel("Cleared!");
-        reloadChat();
-        setTimeout(() => {
-          setButtonLabel("Clear History");
-        }, 1000);
-      })
-      .catch(() => {
-        setButtonLoading(false);
-        setButtonLabel("Error!");
-      });
-    setButtonLabel("Clear History");
-    setButtonLoading(false);
+    setClearError(false);
+    try {
+      await clearChatHistory();
+      reloadChat();
+    } catch {
+      setClearError(true);
+    } finally {
+      setButtonLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -78,18 +57,11 @@ export default function Component({
         </div>
         <div className="flex items-center space-x-4 gap-2 text-default py-4">
           <NightModeToggle />
-          {/* <Button
-            aria-label="clear-history"
-            onClick={clearHistory}
-            isLoading={buttonLoading}
-            className="bg-zinc-800 dark:bg-zinc-200 text-white dark:text-black"
-          >
-            {!buttonLoading && <Trash2 />}
-            {buttonLabel}
-          </Button> */}
+          {clearError && <span role="alert" className="text-sm text-red-600">Unable to clear history</span>}
           <NavDropDown
             clearHistory={clearHistory}
             buttonLoading={buttonLoading}
+            clearDisabled={isChatLoading || buttonLoading}
           />
         </div>
       </div>

@@ -1,12 +1,11 @@
 import { Icon } from "@iconify/react";
 import { marked } from "marked";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import DOMPurify from "dompurify";
-import { motion } from "framer-motion";
+import type { UIMessage } from "ai";
 
 interface MessageProps {
-  content: string;
-  isUserMessage: boolean;
+  message: UIMessage;
 }
 
 marked.use({
@@ -15,7 +14,9 @@ marked.use({
   breaks: false,
 });
 
-export const Message = ({ content, isUserMessage }: MessageProps) => {
+export const Message = ({ message }: MessageProps) => {
+  const content = message.parts.filter(part => part.type === "text").map(part => part.text).join("");
+  const isUserMessage = message.role === "user";
   const [parsedHTML, setParsedHTML] = useState("");
   useEffect(() => {
     (async () => {

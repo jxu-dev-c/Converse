@@ -9,7 +9,7 @@ import {
 import { Notebook, Cog, LogOut, Trash2 } from "lucide-react";
 import React from "react";
 import { useRouter } from "next/navigation";
-import { useFormState } from "react-dom";
+import { startTransition, useActionState } from "react";
 import { SignOut } from "@/app/_action/signOut";
 
 
@@ -23,11 +23,13 @@ const initialState = {
 export default function NavDropDown({
   clearHistory,
   buttonLoading,
+  clearDisabled,
 }: {
-  clearHistory: any;
+  clearHistory: () => void;
   buttonLoading: boolean;
+  clearDisabled: boolean;
 }) {
-  const [logOutState, formAction] = useFormState(SignOut, initialState);
+  const [logOutState, formAction] = useActionState(SignOut, initialState);
   const router = useRouter();
 
   React.useEffect(() => {
@@ -58,6 +60,7 @@ export default function NavDropDown({
           variant="solid"
           aria-label="Dropdown menu with icons"
           className="text-black dark:text-white"
+          disabledKeys={clearDisabled ? ["clear"] : []}
         >
           <DropdownItem key="profile" startContent={<Notebook />}>
             Profile
@@ -69,7 +72,7 @@ export default function NavDropDown({
             key={"logout"}
             color="danger"
             className="text-danger"
-            onClick={()=>{formAction()}}
+            onClick={() => startTransition(() => formAction())}
             startContent={<LogOut />}
           >
             Sign Out

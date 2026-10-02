@@ -14,7 +14,7 @@ import validate from "@/app/lib/validate";
 import PasswordValidator from "./PasswordValidator";
 import { logIn } from "@/app/_action/LogIn";
 import { signUp } from "@/app/_action/signUp";
-import { useFormState } from "react-dom";
+import { useActionState } from "react";
 import { useRouter } from "next/navigation";
 import { UIContext } from "@/app/_context/ChatContext";
 import Link from "next/link";
@@ -46,7 +46,7 @@ export default function SignUpForm({ isNewUser = false }: SignUpFormProps) {
   // success
   // const isInvalid = validate(emailValue, "email");
   // sumit
-  const [formState, formAction] = useFormState(contextFormAction, initialState);
+  const [formState, formAction] = useActionState(contextFormAction, initialState);
   const router = useRouter();
   const showWarning = () => {
     setShowWarningMsg(true);
