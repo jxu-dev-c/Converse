@@ -13,3 +13,10 @@ it.each(["empty", "error"])("falls back on %s", async kind => {
   if (kind === "empty") generate.mockResolvedValue({ text: " " }); else generate.mockRejectedValue(new Error("unavailable"));
   expect(await generateTitle("a".repeat(90))).toBe("a".repeat(60));
 });
+
+it("forwards cancellation so a first-message Stop does not wait for title generation", async () => {
+  const controller = new AbortController();
+  generate.mockResolvedValue({ text: "Title" });
+  await generateTitle("Question", controller.signal);
+  expect(generate.mock.calls[0][0].abortSignal).toBe(controller.signal);
+});

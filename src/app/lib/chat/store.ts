@@ -91,3 +91,13 @@ export async function listChats(userId: string): Promise<ChatSummary[]> {
   }));
   return chats.filter((chat): chat is ChatSummary => chat !== null);
 }
+
+// Atomically claim the producer and save the accepted user turn before returning a stream.
+export async function beginStream(userId: string, chatId: string, streamId: string, messages: ChatMessage[]) {
+  return !!await redis.eval(`
+if redis.call('exists', KEYS[2]) == 0 or redis.call('hget', KEYS[2], 'activeStreamId') then return 0 end
+redis.call('hset', KEYS[2], 'activeStreamId', ARGV[1])
+redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[3])
+redis.call('expire', KEYS[2], ARGV[3])
+return 1`, [chatKey(userId, chatId), metaKey(userId, chatId)], [streamId, JSON.stringify(retain(messages)), CHAT_TTL_SECONDS]);
+}

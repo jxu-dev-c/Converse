@@ -6,7 +6,7 @@ import { POST } from "./route";
 
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(), limit: vi.fn(), load: vi.fn(), save: vi.fn(), clear: vi.fn(),
-  query: vi.fn(), stream: vi.fn(), touch: vi.fn(), rename: vi.fn(), title: vi.fn(),
+  query: vi.fn(), stream: vi.fn(), touch: vi.fn(), rename: vi.fn(), title: vi.fn(), get: vi.fn(), begin: vi.fn(), subscribe: vi.fn(), unsubscribe: vi.fn(), stop: vi.fn(),
 }));
 vi.mock("@/app/_auth/validate-request", () => ({ validateRequest: mocks.auth }));
 vi.mock("@/app/lib/redis", () => ({ redis: {} }));
@@ -14,7 +14,8 @@ vi.mock("@upstash/ratelimit", () => ({ Ratelimit: class {
   static slidingWindow() { return {}; }
   limit = mocks.limit;
 } }));
-vi.mock("@/app/lib/chat/store", () => ({ loadChat: mocks.load, saveChat: mocks.save, touchChat: mocks.touch, renameChat: mocks.rename }));
+vi.mock("@/app/lib/chat/store", () => ({ loadChat: mocks.load, saveChatIfActive: (user: string, id: string, stream: string, messages: ChatMessage[]) => mocks.save(user, messages, id), getChat: mocks.get, beginStream: mocks.begin, touchChat: mocks.touch, renameChat: mocks.rename }));
+vi.mock("@/app/lib/chat/stream", () => ({ batchSse: (stream: ReadableStream<string>) => stream, subscribe: mocks.subscribe, stopActiveStream: mocks.stop, streamContext: { createNewResumableStream: async (_id: string, make: () => ReadableStream<string>) => make() } }));
 vi.mock("@/app/lib/chat/title", () => ({ generateTitle: mocks.title }));
 vi.mock("@upstash/vector", () => ({ Index: class {
   static fromEnv() { return { query: mocks.query }; }
@@ -63,6 +64,10 @@ beforeEach(() => {
   mocks.query.mockResolvedValue([{ id: "label-id", score: 0.8, data: "Ibuprofen label evidence" }]);
   mocks.stream.mockImplementation(() => textStream());
   mocks.save.mockResolvedValue(undefined);
+  mocks.get.mockResolvedValue(null);
+  mocks.begin.mockResolvedValue(true);
+  mocks.subscribe.mockResolvedValue(mocks.unsubscribe);
+  mocks.stop.mockResolvedValue(true);
   mocks.touch.mockResolvedValue(false);
   mocks.title.mockResolvedValue("Ibuprofen label uses");
 });
@@ -219,7 +224,7 @@ it.each([false, true])("lets the model answer when search is empty or unavailabl
   } finally { log.mockRestore(); }
 });
 
-it("persists a partial assistant response and retrieved sources when the client disconnects", async () => {
+it("finishes and persists the response independently when the client disconnects", async () => {
   mocks.stream.mockResolvedValueOnce(searchStream("ibuprofen uses"));
   mocks.stream.mockImplementation(() => textStream("Ibuprofen relieves pain.", 30));
   const response = await POST(request());
@@ -236,46 +241,33 @@ it("persists a partial assistant response and retrieved sources when the client 
   const messages = mocks.save.mock.calls[0][1] as ChatMessage[];
   expect(messages[0]).toEqual(question);
   const text = messages.at(-1)!.parts.filter(part => part.type === "text").map(part => part.text).join("");
-  expect(text).toBe("Ibuprofen ");
+  expect(text).toBe("Ibuprofen relieves pain.");
   expect(messages.at(-1)!.metadata).toEqual({ reasoningMs: 0 });
 });
 
-it("resumes a conversation cancelled during tool input without an unmatched tool call", async () => {
-  let provider!: ReadableStreamDefaultController<StreamChunk>;
-  mocks.stream.mockResolvedValueOnce({ stream: new ReadableStream<StreamChunk>({ start(controller) {
-    provider = controller;
-    controller.enqueue({ type: "stream-start", warnings: [] });
-    controller.enqueue({ type: "tool-input-start", id: "pending", toolName: "searchDrugLabels" });
-    controller.enqueue({ type: "tool-input-delta", id: "pending", delta: '{"query":"ibu' });
-  } }) });
+it("aborts on a server stop signal and saves the partial before a newer stream", async () => {
+  mocks.stream.mockImplementation(() => textStream("Ibuprofen relieves pain.", 80));
   const response = await POST(request());
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   while (true) {
     const { done, value } = await reader.read();
-    if (done || decoder.decode(value).includes("tool-input-delta")) break;
+    if (done || decoder.decode(value).includes('"type":"text-delta"')) break;
   }
-  await reader.cancel();
+  mocks.subscribe.mock.calls[0][1]("stop");
+  while (!(await reader.read()).done) { /* drain abort */ }
   await vi.waitFor(() => expect(mocks.save).toHaveBeenCalledOnce());
-  const stored = mocks.save.mock.calls[0][1] as ChatMessage[];
-  expect(stored.at(-1)!.parts).toContainEqual(expect.objectContaining({
-    type: "tool-searchDrugLabels", toolCallId: "pending", state: "input-streaming",
-  }));
-
-  // Finish the independently consumed provider stream before starting another turn.
-  provider.enqueue({ type: "tool-input-end", id: "pending" });
-  provider.enqueue({ type: "tool-call", toolCallId: "pending", toolName: "searchDrugLabels", input: '{"query":"ibuprofen"}' });
-  provider.enqueue({ type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage });
-  provider.close();
-  await vi.waitFor(() => expect(mocks.stream).toHaveBeenCalledTimes(2));
-
-  mocks.load.mockResolvedValue(stored);
-  const next = await POST(request({ id: "default", message: { ...question, id: "next" } }));
-  expect(next.status).toBe(200);
-  await next.text();
-  expect(JSON.stringify(mocks.stream.mock.calls[2][0].prompt)).not.toContain('"toolCallId":"pending"');
+  const messages = mocks.save.mock.calls[0][1] as ChatMessage[];
+  expect(messages.at(-1)?.parts.filter(part => part.type === "text").map(part => part.text).join("")).toBe("Ibuprofen ");
+  expect(mocks.unsubscribe).toHaveBeenCalled();
 });
-
+it("waits for a previous producer and rejects a concurrent claim", async () => {
+  mocks.get.mockResolvedValue({ meta: { activeStreamId: "old" } });
+  mocks.begin.mockResolvedValue(false);
+  expect((await POST(request())).status).toBe(409);
+  expect(mocks.stop).toHaveBeenCalledWith("stable-user", "default", "old");
+  expect(mocks.stream).not.toHaveBeenCalled();
+});
 
 it("accepts any valid chat ID and emits a transient title only for the first message", async () => {
   mocks.touch.mockResolvedValueOnce(true);

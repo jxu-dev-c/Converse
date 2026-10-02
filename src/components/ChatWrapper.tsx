@@ -1,5 +1,5 @@
 "use client";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { type ChatMessage } from "@/app/lib/chat/types";
@@ -20,12 +20,23 @@ export const ChatWrapper = ({ chatId, initialMessages, resume = false }: {
 }) => {
   const list = useChatList();
   const inputHeight = 55;
+  const [stopError, setStopError] = useState("");
   const [input, setInput] = useState("");
   const { messages, sendMessage, status, error, stop } = useChat<ChatMessage>({
-    id: chatId, messages: initialMessages, transport, resume,
+    id: chatId, messages: initialMessages, transport, resume, experimental_throttle: 50,
     onData: part => { if (part.type === "data-title") list.upsert({ id: chatId, title: part.data.title }); },
   });
   const isLoading = status === "submitted" || status === "streaming";
+  useEffect(() => {
+    if (messages.length) list.upsert({ id: chatId, activeStreamId: isLoading ? "active" : undefined });
+  }, [isLoading, chatId, messages.length, list.upsert]);
+  async function stopReply() {
+    try {
+      const response = await fetch(`/api/chat/${chatId}/stop`, { method: "POST" });
+      if (!response.ok) throw new Error();
+      await stop(); setStopError("");
+    } catch { setStopError("Unable to stop the reply. Please try again."); }
+  }
   const chatState = isLoading ? "Loading" : error ? "Error" : messages.length ? "Finished" : "Ready";
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -50,6 +61,7 @@ export const ChatWrapper = ({ chatId, initialMessages, resume = false }: {
         style={{ maxHeight: `${inputHeight * 1.3}px` }}
       >
         <div className="container mx-auto h-full">
+          {stopError && <p role="alert" className="px-5 text-sm text-red-600">{stopError}</p>}
           {error && <p role="alert" className="px-5 text-sm text-red-600">Unable to send your message. Please try again.</p>}
           <ChatInput
             chatState={chatState}
@@ -57,7 +69,7 @@ export const ChatWrapper = ({ chatId, initialMessages, resume = false }: {
             inputHeight={inputHeight}
             onInputChange={event => setInput(event.target.value)}
             onSubmit={onSubmit}
-            onStop={() => { void stop(); }}
+            onStop={() => { void stopReply(); }}
           />
         </div>
       </div>
