@@ -1,11 +1,15 @@
-import type { UIMessage } from "ai";
+import type { InferUITools, UIMessage } from "ai";
 import { z } from "zod";
+import type { createSearchTools } from "./retrieval";
 
 export const CHAT_ID = "default";
+export const sourceSchema = z.object({ id: z.string(), score: z.number() });
+export type ChatSource = z.infer<typeof sourceSchema>;
 export const messageMetadataSchema = z.object({
-  sources: z.array(z.object({ id: z.string(), score: z.number() })).optional(),
+  sources: z.array(sourceSchema).optional(),
 });
-export type ChatMessage = UIMessage<z.infer<typeof messageMetadataSchema>>;
+export type ChatTools = InferUITools<ReturnType<typeof createSearchTools>>;
+export type ChatMessage = UIMessage<z.infer<typeof messageMetadataSchema>, never, ChatTools>;
 
 // Only user text is accepted from the client; history and sources belong to the server.
 export const chatRequestSchema = z.object({

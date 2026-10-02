@@ -1,49 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
-import { MockLanguageModelV4 } from "ai/test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Index } from "@upstash/vector";
-import { condenseQuery, retrieveContext } from "./retrieval";
-import type { ChatMessage } from "./types";
+import { createSearchTools, retrieveContext, searchInputSchema } from "./retrieval";
 
-const message = (id: string, role: "user" | "assistant", text: string): ChatMessage => ({ id, role, parts: [{ type: "text", text }] });
-const window = [message("u1", "user", "What is ibuprofen used for?"), message("a1", "assistant", "Pain relief"), message("u2", "user", "What are its side effects?")];
-const usage = {
-  inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
-  outputTokens: { total: 5, text: 5, reasoning: 0 },
-};
-const modelWithText = (text: string) => new MockLanguageModelV4({
-  doGenerate: { content: [{ type: "text", text }], finishReason: { unified: "stop", raw: "stop" }, usage, warnings: [] },
-});
-
-describe("condenseQuery", () => {
-  it("skips the model on the first turn", async () => {
-    const model = new MockLanguageModelV4();
-    expect(await condenseQuery(window.slice(0, 1), model)).toBe("What is ibuprofen used for?");
-    expect(model.doGenerateCalls).toHaveLength(0);
-  });
-  it("rewrites follow-ups with actual AI SDK generation and role messages", async () => {
-    const model = modelWithText(" ibuprofen side effects ");
-    expect(await condenseQuery(window, model)).toBe("ibuprofen side effects");
-    const prompt = model.doGenerateCalls[0].prompt;
-    expect(prompt.map(message => message.role)).toEqual(["system", "user", "assistant", "user"]);
-    expect(JSON.stringify(prompt)).toContain("ibuprofen");
-    expect(JSON.stringify(prompt.at(-1))).toContain("Rewrite this question");
-    expect(JSON.stringify(prompt.at(-1))).toContain("What are its side effects?");
-    expect(model.doGenerateCalls[0].providerOptions).toEqual({ deepseek: { thinking: { type: "disabled" } } });
-  });
-  it("limits the condensation history to recent turns", async () => {
-    const model = modelWithText("ibuprofen dose");
-    await condenseQuery([...window.slice(0, 2), ...window.slice(0, 2), ...window.slice(0, 2), ...window], model);
-    expect(model.doGenerateCalls[0].prompt).toHaveLength(6); // instructions plus five role messages
-    expect(model.doGenerateCalls[0].prompt[1].role).toBe("user");
-  });
-  it("falls back to the raw question on provider errors", async () => {
-    const model = new MockLanguageModelV4({ doGenerate: async () => { throw new Error("unavailable"); } });
-    expect(await condenseQuery(window, model)).toBe("What are its side effects?");
-  });
-  it("falls back on an empty response", async () => {
-    expect(await condenseQuery(window, modelWithText(" "))).toBe("What are its side effects?");
-  });
-});
+afterEach(() => vi.restoreAllMocks());
 
 it("retrieves hosted embeddings and filters low-score or missing documents", async () => {
   const query = vi.fn().mockResolvedValue([
@@ -52,11 +11,33 @@ it("retrieves hosted embeddings and filters low-score or missing documents", asy
     { id: "low", score: 0.49, data: "irrelevant" },
     { id: "missing", score: 0.9 },
   ]);
-  const spy = vi.spyOn(Index, "fromEnv").mockReturnValue({ query } as unknown as Index);
-  try {
-    expect(await retrieveContext("ibuprofen")).toEqual({
-      docs: ["label", "threshold"], sources: [{ id: "good", score: 0.8 }, { id: "2", score: 0.5 }],
+  vi.spyOn(Index, "fromEnv").mockReturnValue({ query } as unknown as Index);
+  expect(await retrieveContext("ibuprofen")).toEqual({
+    docs: ["label", "threshold"], sources: [{ id: "good", score: 0.8 }, { id: "2", score: 0.5 }],
+  });
+  expect(query).toHaveBeenCalledWith({ data: "ibuprofen", topK: 5, includeData: true, includeMetadata: true });
+});
+
+describe("search tool", () => {
+  it.each(["", "   ", "x".repeat(3001), null, 123])("rejects invalid query %#", query => {
+    expect(searchInputSchema.safeParse({ query }).success).toBe(false);
+  });
+  it("accepts trimmed queries up to 3000 characters", () => {
+    expect(searchInputSchema.parse({ query: " ibuprofen uses " })).toEqual({ query: "ibuprofen uses" });
+    expect(searchInputSchema.safeParse({ query: "x".repeat(3000) }).success).toBe(true);
+  });
+  it("distinguishes unavailable search from no matching excerpts without exposing errors", async () => {
+    const query = vi.fn().mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("secret URL/token"));
+    vi.spyOn(Index, "fromEnv").mockReturnValue({ query } as unknown as Index);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sources = vi.fn();
+    const { searchDrugLabels } = createSearchTools(sources);
+    const options = { toolCallId: "call", messages: [], context: {} };
+    expect(await searchDrugLabels.execute!({ query: "ibuprofen" }, options)).toEqual({ docs: [], sources: [] });
+    expect(await searchDrugLabels.execute!({ query: "ibuprofen" }, options)).toEqual({
+      docs: [], sources: [], error: "Search unavailable. Please try again.",
     });
-    expect(query).toHaveBeenCalledWith({ data: "ibuprofen", topK: 5, includeData: true, includeMetadata: true });
-  } finally { spy.mockRestore(); }
+    expect(sources).toHaveBeenCalledExactlyOnceWith([]);
+    expect(log).toHaveBeenCalledExactlyOnceWith("Chat search failed");
+  });
 });

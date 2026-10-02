@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { ModelMessage } from "ai";
-import { mergeIncoming, selectHistoryWindow, withReferenceMaterial } from "./context";
+import { convertToModelMessages, validateUIMessages } from "ai";
+import { mergeIncoming, selectHistoryWindow } from "./context";
+import { createSearchTools } from "./retrieval";
 import type { ChatMessage } from "./types";
 
 const msg = (id: string, role: "user" | "assistant", text = "text"): ChatMessage => ({
@@ -41,25 +42,36 @@ describe("selectHistoryWindow", () => {
   });
 });
 
-describe("withReferenceMaterial", () => {
-  it("changes only the latest user message, preserving the prefix and original input", () => {
-    const messages: ModelMessage[] = [
-      { role: "user", content: "ibuprofen" },
-      { role: "assistant", content: "pain relief" },
-      { role: "user", content: "side effects?" },
-    ];
-    const result = withReferenceMaterial(messages, ["drug label"]);
-    expect(result.slice(0, 2)).toEqual(messages.slice(0, 2));
-    expect(result[0]).toBe(messages[0]);
-    expect(result[2].content).toContain('<reference_material source="knowledge_base">');
-    expect(result[2].content).toContain("side effects?");
-    expect(messages[2].content).toBe("side effects?");
-  });
-  it("supports multipart content and empty retrieval results", () => {
-    const messages: ModelMessage[] = [{ role: "user", content: [{ type: "text", text: "question" }] }];
-    expect(withReferenceMaterial(messages, [])[0].content).toEqual([
-      { type: "text", text: '<reference_material source="knowledge_base">\n[]\n</reference_material>\n\n' },
-      { type: "text", text: "question" },
-    ]);
-  });
+it("counts tool evidence against the history budget and retains whole turns", () => {
+  const evidence: ChatMessage = { id: "a", role: "assistant", parts: [{
+    type: "tool-searchDrugLabels", toolCallId: "call", state: "output-available",
+    input: { query: "ibuprofen uses" }, output: { docs: ["x".repeat(1000)], sources: [] },
+  }] };
+  const messages = [msg("u", "user"), evidence, msg("next", "user")];
+  expect(selectHistoryWindow(messages, { maxChars: 100 })).toEqual(messages.slice(-1));
+  expect(selectHistoryWindow(messages, { maxChars: 2000 })).toEqual(messages);
+});
+
+it("omits unfinished tool calls after cancellation, preserving completed evidence", async () => {
+  const tools = createSearchTools();
+  const messages: ChatMessage[] = [msg("u", "user"), { id: "a", role: "assistant", parts: [
+    { type: "tool-searchDrugLabels", toolCallId: "done", state: "output-available",
+      input: { query: "ibuprofen uses" }, output: { docs: ["label evidence"], sources: [] } },
+    { type: "tool-searchDrugLabels", toolCallId: "pending", state: "input-streaming", input: { query: "ibu" } },
+  ] }, msg("next", "user")];
+  const validated = await validateUIMessages<ChatMessage>({ messages, tools });
+  const converted = await convertToModelMessages(validated, { tools, ignoreIncompleteToolCalls: true });
+  expect(JSON.stringify(converted)).toContain("label evidence");
+  expect(JSON.stringify(converted)).toContain('"toolCallId":"done"');
+  expect(JSON.stringify(converted)).not.toContain('"toolCallId":"pending"');
+  expect(converted.map(message => message.role)).toEqual(["user", "assistant", "tool", "user"]);
+});
+
+it("validates stored tool outputs", async () => {
+  const tools = createSearchTools();
+  const messages = [{ id: "a", role: "assistant", parts: [{
+    type: "tool-searchDrugLabels", toolCallId: "call", state: "output-available",
+    input: { query: "ibuprofen" }, output: { docs: [123], sources: [] },
+  }] }];
+  await expect(validateUIMessages({ messages, tools })).rejects.toThrow();
 });

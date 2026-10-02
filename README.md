@@ -6,7 +6,7 @@ Converse is a research chatbot over openFDA OTC drug labels. It retrieves refere
 
 - Next.js 16 (App Router, Turbopack, `proxy.ts`), React 19, Node 24
 - AI SDK 7, `@ai-sdk/react` 4, `@ai-sdk/deepseek` 3
-- DeepSeek `deepseek-v4-flash`, with thinking disabled for chat and query rewriting
+- DeepSeek `deepseek-v4-flash`, with thinking disabled and model-controlled search
 - Upstash Vector with hosted embeddings, Redis history, and per-user rate limits
 - Existing Lucia / AWS DynamoDB authentication
 - NextUI, Tailwind CSS, and sanitized Markdown rendering with marked / DOMPurify
@@ -43,11 +43,15 @@ For Vercel, add `DEEPSEEK_API_KEY`, optionally set `DEEPSEEK_MODEL`, and retain 
 
 The client sends only `{ id, message }` to `POST /api/chat`. The server authenticates the user, rate-limits that user (10 requests per 10 seconds), loads their stored conversation, and merges the incoming message by ID. Retrying a stored question truncates that question and later messages before appending it again.
 
-The model sees at most the latest 24 messages / 24,000 text characters, starting on a user turn. Follow-up questions are rewritten using recent role messages before searching the Vector index. Retrieval keeps up to five documents with scores >=0.5. Only the latest user model message receives reference material; instructions and earlier history stay stable for DeepSeek prefix caching. Cache hits are best-effort, not guaranteed on every request. Stored messages remain raw, with source IDs and scores in assistant metadata.
+The model sees at most the latest 24 messages / 24,000 content characters (including tool results), starting on a user turn. User messages are passed through unchanged. The server offers a `searchDrugLabels` tool; the model decides whether to search and supplies a focused query, resolving drug names from the conversation. Greetings need no search, and follow-ups can reuse relevant label results already in history. There is no separate query-rewriting call or automatic search for every prompt.
 
-History lives at `chat:{userId}:default` (one conversation per user), retains up to 200 messages, and expires 30 days after a save. Logging out and back in preserves it. Old session-keyed Redis history is not migrated and is orphaned. The provider stream is consumed independently; AI SDK 7's UI `onEnd` saves the completed or cancelled partial reply. The Stop button ends the client stream. `DELETE /api/chat` clears the authenticated user's history; clearing is disabled while a reply streams.
+Search uses the existing Vector index and hosted embeddings, keeping up to five documents with scores >=0.5. Tool calls and their label results are persisted in assistant message parts so later turns can reuse evidence. Drug claims must be grounded in relevant label excerpts, not earlier assistant answers or general model knowledge. Empty results and search failures are distinguished. Generation allows up to three search rounds, followed by a final answer step with tools disabled. Source IDs and scores from successful searches in the current response are deduplicated in assistant metadata, retaining the highest score for each ID. Instructions and prior history remain stable for best-effort DeepSeek prefix caching.
 
-Development logs include condensed queries, retrieved source IDs/scores, and `promptCacheHitTokens`. Production does not log conversation text or provider metadata.
+The chat UI renders expandable search activity entries from the SDK tool parts, showing running, completed, unavailable, or stopped searches. These display labels are UI-only; they are never appended to assistant text or model context.
+
+History lives at `chat:{userId}:default` (one conversation per user), retains up to 200 messages, and expires 30 days after a save. Logging out and back in preserves it. Old session-keyed Redis history is not migrated and is orphaned. The provider stream is consumed independently; AI SDK 7's UI `onEnd` saves the completed or cancelled partial reply. Incomplete tool calls are omitted when converting history for the next model request; completed tool results remain usable. The Stop button ends the client stream. `DELETE /api/chat` clears the authenticated user's history; clearing is disabled while a reply streams.
+
+Development logs include tool search queries, retrieved source IDs/scores, and `promptCacheHitTokens`. Production does not log conversation text or provider metadata.
 
 ## Checks
 
@@ -61,15 +65,15 @@ npm test
 npm run build
 ```
 
-Vitest covers history merging/windowing, reference placement, query rewriting with the AI SDK mock model, retrieval filtering, storage retention, and API behavior.
+Vitest covers history merging/windowing including tool evidence, model-controlled search with the AI SDK mock model, retrieval filtering and failures, persisted tool validation, search round limits, storage retention, and API behavior.
 
-Live verification requires configured services and a test login: ask about ibuprofen, follow up about its side effects and max daily dose, reload, stop a reply and reload, clear history, and log out/back in. Check Redis for unique message IDs and inspect the development cache logs. Check HTTP 401/403/429 responses and the default 503 gate.
+Live verification requires configured services and a test login: send a greeting and confirm there is no retrieval log, ask about ibuprofen and confirm a focused tool query, then follow up about its side effects and max daily dose. Repeat a covered question to check evidence reuse, reload, stop a reply and reload, clear history, and log out/back in. Check Redis for tool results and unique message IDs and inspect the development cache logs. Check HTTP 401/403/429 responses and the default 503 gate.
 
 ## Data and follow-ups
 
 Download label JSON from [openFDA](https://open.fda.gov/data/downloads/) and use [the dataset notebook](python/FDA-Dataset.ipynb) as a guide.
 
-Follow-ups: migrate NextUI to HeroUI and review the unused `/api/auth` route. Lucia/DynamoDB auth is unchanged in this migration. Simultaneous conversations in multiple tabs still share the single default history; cross-tab write coordination is a follow-up. Evaluate drug-specific retrieval relevance: a correct rewritten query can still return labels for other drugs, in which case the assistant must acknowledge missing evidence.
+Follow-ups: migrate NextUI to HeroUI and review the unused `/api/auth` route. Lucia/DynamoDB auth is unchanged. Simultaneous conversations in multiple tabs still share the single default history; cross-tab write coordination is a follow-up. Evaluate drug-specific retrieval relevance: a focused tool query can still return labels for other drugs, in which case the assistant must acknowledge missing evidence.
 
 ## Screenshots
 

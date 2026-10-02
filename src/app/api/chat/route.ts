@@ -1,15 +1,15 @@
 import { validateRequest } from "@/app/_auth/validate-request";
-import { mergeIncoming, selectHistoryWindow, withReferenceMaterial } from "@/app/lib/chat/context";
+import { mergeIncoming, selectHistoryWindow } from "@/app/lib/chat/context";
 import { chatModel, providerOptions } from "@/app/lib/chat/model";
 import { INSTRUCTIONS } from "@/app/lib/chat/prompts";
-import { condenseQuery, retrieveContext } from "@/app/lib/chat/retrieval";
+import { createSearchTools } from "@/app/lib/chat/retrieval";
 import { clearChat, loadChat, saveChat } from "@/app/lib/chat/store";
-import { chatRequestSchema, messageMetadataSchema, type ChatMessage } from "@/app/lib/chat/types";
+import { chatRequestSchema, messageMetadataSchema, type ChatMessage, type ChatSource } from "@/app/lib/chat/types";
 import { redis } from "@/app/lib/redis";
 import { Ratelimit } from "@upstash/ratelimit";
 import {
   convertToModelMessages, createIdGenerator, createUIMessageStreamResponse,
-  streamText, toUIMessageStream, validateUIMessages,
+  stepCountIs, streamText, toUIMessageStream, validateUIMessages,
 } from "ai";
 import { type NextRequest } from "next/server";
 import { verifyRequestOrigin } from "lucia";
@@ -42,19 +42,28 @@ export async function POST(req: NextRequest) {
   const { id, message } = parsed.data;
 
   try {
+    const sources = new Map<string, ChatSource>();
+    const tools = createSearchTools(found => {
+      for (const source of found) {
+        if (source.score > (sources.get(source.id)?.score ?? -Infinity)) sources.set(source.id, source);
+      }
+    });
     const merged = await validateUIMessages<ChatMessage>({
       messages: mergeIncoming(await loadChat(user.id, id), message),
       metadataSchema: messageMetadataSchema.optional(),
+      tools,
     });
     const window = selectHistoryWindow(merged);
-    const query = await condenseQuery(window);
-    const { docs, sources } = await retrieveContext(query);
-    if (process.env.NODE_ENV === "development") console.info("Chat retrieval", { query, sources });
 
     const result = streamText({
       model: chatModel,
       instructions: INSTRUCTIONS,
-      messages: withReferenceMaterial(await convertToModelMessages(window), docs),
+      messages: await convertToModelMessages(window, { tools, ignoreIncompleteToolCalls: true }),
+      tools,
+      toolChoice: "auto",
+      stopWhen: stepCountIs(4),
+      // Reserve the fourth step for an answer after up to three search rounds.
+      prepareStep: ({ stepNumber }) => stepNumber >= 3 ? { toolChoice: "none", activeTools: [] } : undefined,
       maxOutputTokens: 1024,
       providerOptions,
       onEnd: ({ providerMetadata }) => {
@@ -72,9 +81,11 @@ export async function POST(req: NextRequest) {
     return createUIMessageStreamResponse({
       stream: toUIMessageStream({
         stream: result.stream,
+        tools,
         originalMessages: merged,
         generateMessageId: createIdGenerator({ prefix: "msg", size: 16 }),
-        messageMetadata: ({ part }) => part.type === "start" ? { sources } : undefined,
+        messageMetadata: ({ part }) => ["start", "tool-result", "finish"].includes(part.type)
+          ? { sources: [...sources.values()] } : undefined,
         onEnd: async ({ messages }) => {
           await saveChat(user.id, messages, id);
         },
