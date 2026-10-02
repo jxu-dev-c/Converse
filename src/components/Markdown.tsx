@@ -2,7 +2,7 @@
 import { Marked } from "marked";
 import { useMemo, useRef, useState, useSyncExternalStore } from "react";
 import DOMPurify from "dompurify";
-import type { Excerpt } from "@/app/lib/chat/citations";
+import { excerptFields, type Excerpt } from "@/app/lib/chat/citations";
 
 const parser = new Marked({ async: false, gfm: true });
 parser.use({ extensions: [{
@@ -31,6 +31,6 @@ export function Markdown({ content, citations }: { content: string; citations?: 
   }
   return <div ref={container} className="relative min-w-0 break-words [&_p]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_a]:underline [&_.citation-chip]:inline-block [&_.citation-chip]:leading-normal [&_.citation-chip]:text-blue-600 dark:[&_.citation-chip]:text-blue-400">
     <div onMouseOver={event => show(event.target)} onMouseLeave={() => setActive(undefined)} onFocus={event => show(event.target)} onBlur={() => setActive(undefined)} dangerouslySetInnerHTML={{ __html: html }} />
-    {active && <div role="tooltip" style={{ top: active.top, left: active.left }} className="pointer-events-none absolute z-30 w-96 max-w-full rounded-lg border bg-white p-3 text-sm shadow-lg dark:border-zinc-600 dark:bg-zinc-900"><strong>{active.excerpt.title ?? "OTC label"}</strong><p>{active.excerpt.text.slice(0, 240)}…</p></div>}
+    {active && <div role="tooltip" style={{ top: active.top, left: active.left }} className="pointer-events-none absolute z-30 w-96 max-w-full rounded-lg border bg-white p-3 text-sm shadow-lg dark:border-zinc-600 dark:bg-zinc-900"><strong>{active.excerpt.title ?? "OTC label"}</strong>{excerptFields(active.excerpt.text).slice(0, 3).map(field => <p key={field.label} className="mt-1 line-clamp-3">{field.label && <span className="font-medium">{field.label}: </span>}{field.value}</p>)}</div>}
   </div>;
 }

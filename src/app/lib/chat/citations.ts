@@ -37,6 +37,18 @@ export function createCitationRegistry(history: ChatMessage[]): CitationRegistry
   return { refs, excerpts, register };
 }
 
+const titleFields = new Set(["Drug_Name", "Manufacturer"]);
+export function excerptFields(text: string): { label: string; value: string }[] {
+  try {
+    const data: unknown = JSON.parse(text);
+    if (data && typeof data === "object" && !Array.isArray(data)) return Object.entries(data).flatMap(([key, value]) => {
+      const content = typeof value === "string" ? value : Array.isArray(value) ? value.join(", ") : value == null ? "" : JSON.stringify(value);
+      return titleFields.has(key) || !content.trim() ? [] : [{ label: key.replaceAll("_", " "), value: content.trim() }];
+    });
+  } catch {}
+  return [{ label: "", value: text }];
+}
+
 export function citedRefs(text: string): number[] {
   const refs = new Set<number>();
   function visit(tokens: Token[]) {
