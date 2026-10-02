@@ -1,3 +1,4 @@
+import { createCitationRegistry } from "@/app/lib/chat/citations";
 import type { ChatMessage } from "@/app/lib/chat/types";
 import { Message } from "./Message";
 import { Icon } from "@iconify/react";
@@ -36,6 +37,7 @@ export const Messages = ({ messages, isStreaming = false }: MessageProps) => {
         {messages.length > 0 ? (
           messages.map((message, index) => (
             <Message
+              citations={createCitationRegistry(messages).excerpts}
               key={message.id}
               message={message}
               isStreaming={isStreaming && message.role === "assistant" && index === messages.length - 1}

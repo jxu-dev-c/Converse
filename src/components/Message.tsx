@@ -1,42 +1,17 @@
 import { Icon } from "@iconify/react";
-import { marked } from "marked";
-import { useEffect, useState } from "react";
-import DOMPurify from "dompurify";
+import { Markdown } from "./Markdown";
+import { Sources } from "./Sources";
+import type { Excerpt } from "@/app/lib/chat/citations";
 import type { ChatMessage } from "@/app/lib/chat/types";
 import { ToolActivity } from "./ToolActivity";
 
 interface MessageProps {
   message: ChatMessage;
   isStreaming?: boolean;
+  citations?: Map<number, Excerpt>;
 }
 
-marked.use({
-  async: true,
-  gfm: true,
-  breaks: false,
-});
-
-function MarkdownContent({ content, isUserMessage = false }: { content: string; isUserMessage?: boolean }) {
-  const [parsedHTML, setParsedHTML] = useState("");
-  useEffect(() => {
-    let current = true;
-    (async () => {
-      const html = await marked.parse(content);
-      const cleaned = DOMPurify.sanitize(html);
-      if (current) setParsedHTML(cleaned);
-    })();
-    return () => { current = false; };
-  }, [content]);
-  if (!content) return null;
-  return (
-    <div
-      className={`p-3 rounded-md ${isUserMessage ? "bg-green-400" : "bg-blue-400"}`}
-      dangerouslySetInnerHTML={{ __html: parsedHTML as string | TrustedHTML }}
-    />
-  );
-}
-
-export const Message = ({ message, isStreaming = false }: MessageProps) => {
+export const Message = ({ message, isStreaming = false, citations = new Map() }: MessageProps) => {
   const isUserMessage = message.role === "user";
   return (
     <div className={"p-6 message"}>
@@ -59,14 +34,15 @@ export const Message = ({ message, isStreaming = false }: MessageProps) => {
         </div>
         <div className="min-w-0 space-y-3">
           {isUserMessage ? (
-            <MarkdownContent isUserMessage content={message.parts.filter(part => part.type === "text").map(part => part.text).join("")} />
+            <Markdown citations={citations} content={message.parts.filter(part => part.type === "text").map(part => part.text).join("")} />
           ) : message.parts.map((part, index) => {
-            if (part.type === "text") return <MarkdownContent key={index} content={part.text} />;
+            if (part.type === "text") return <Markdown citations={citations} key={index} content={part.text} />;
             if (part.type === "tool-searchDrugLabels" || (part.type === "dynamic-tool" && part.toolName === "searchDrugLabels")) {
               return <ToolActivity key={part.toolCallId} part={part} isStreaming={isStreaming} />;
             }
             return null;
           })}
+          {!isUserMessage && <Sources message={message} citations={citations} />}
         </div>
       </div>
     </div>

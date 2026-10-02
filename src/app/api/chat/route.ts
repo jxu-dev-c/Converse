@@ -1,5 +1,6 @@
 import { validateRequest } from "@/app/_auth/validate-request";
 import { mergeIncoming, prepareHistory } from "@/app/lib/chat/context";
+import { createCitationRegistry } from "@/app/lib/chat/citations";
 import { converseAgent } from "@/app/lib/chat/agent";
 import { clearChat, loadChat, saveChat } from "@/app/lib/chat/store";
 import { chatRequestSchema, messageMetadataSchema, type ChatMessage } from "@/app/lib/chat/types";
@@ -50,6 +51,7 @@ export async function POST(req: NextRequest) {
 
     const result = await converseAgent.stream({
       messages: await convertToModelMessages(window, { tools, ignoreIncompleteToolCalls: true }),
+      options: { registry: createCitationRegistry(merged) },
       abortSignal: req.signal,
     });
     const reasoningStarts = new Map<string, number>();

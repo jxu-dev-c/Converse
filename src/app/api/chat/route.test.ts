@@ -147,7 +147,7 @@ it("executes the model's query, streams its answer, and persists evidence for fo
   expect(stored[0]).toEqual(question);
   expect(stored[1].parts).toContainEqual(expect.objectContaining({
     type: "tool-searchDrugLabels", state: "output-available", input: { query: "ibuprofen uses" },
-    output: { docs: ["Ibuprofen label evidence"], sources: [{ id: "label-id", score: 0.8 }] },
+    output: { excerpts: [{ ref: 1, id: "label-id", text: "Ibuprofen label evidence", score: 0.8 }] },
   }));
   expect(stored[1].metadata).toEqual({ reasoningMs: 0 });
 
