@@ -1,60 +1,48 @@
 "use client";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { type ChatMessage } from "@/app/lib/chat/types";
 import { Messages } from "./Messages";
-import NavBar from "@/components/navBar";
+import { useChatList } from "./ChatListProvider";
+import NavBar from "./navBar";
 import ChatInput from "./ChatInput";
-
 const transport = new DefaultChatTransport<ChatMessage>({
   api: "/api/chat",
-  prepareSendMessagesRequest: ({ id, messages }) => ({ body: { id, message: messages.at(-1) } }),
+  prepareSendMessagesRequest: ({ id, messages }) => ({ body: { id, message: messages.findLast(message => message.role === "user") } }),
 });
-
-export const ChatWrapper = ({ chatId, initialMessages }: {
-  chatId: string;
-  initialMessages: ChatMessage[];
-}) => {
-  const inputHeight = 55;
+export const ChatWrapper = ({ chatId, initialMessages, resume = false }: { chatId: string; initialMessages: ChatMessage[]; resume?: boolean }) => {
+  const { upsert } = useChatList();
   const [input, setInput] = useState("");
-  const { messages, sendMessage, status, error, setMessages, stop, clearError } = useChat<ChatMessage>({
-    id: chatId, messages: initialMessages, transport,
+  const [stopError, setStopError] = useState("");
+  const { messages, sendMessage, regenerate, status, error, stop, clearError } = useChat<ChatMessage>({
+    id: chatId, messages: initialMessages, transport, resume, experimental_throttle: 50,
+    onData: part => { if (part.type === "data-title") upsert({ id: chatId, title: part.data.title }); },
   });
-  const isLoading = status === "submitted" || status === "streaming";
-  const chatState = isLoading ? "Loading" : error ? "Error" : messages.length ? "Finished" : "Ready";
-  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (isLoading || !input.trim()) return;
-    void sendMessage({ text: input });
-    setInput("");
-  };
-
-  return (
-    <div className="relative min-h-full dark:bg-zinc-800 bg-zinc-200 flex flex-col justify-between">
-      <NavBar reloadChat={() => { setMessages([]); clearError(); }} isChatLoading={isLoading} />
-      <div
-        className="flex-1 text-black dark:bg-zinc-800 bg-gray-100 justify-between flex flex-col h-screen"
-        style={{ paddingBottom: `${inputHeight * 1.3}px` }}
-      >
-        <Messages messages={messages} isStreaming={isLoading} />
-      </div>
-      <div
-        className="w-full fixed bottom-0 left-0 right-0 bg-gray-100/75 dark:bg-zinc-800/75 backdrop-blur-md z-10"
-        style={{ maxHeight: `${inputHeight * 1.3}px` }}
-      >
-        <div className="container mx-auto h-full">
-          {error && <p role="alert" className="px-5 text-sm text-red-600">Unable to send your message. Please try again.</p>}
-          <ChatInput
-            chatState={chatState}
-            input={input}
-            inputHeight={inputHeight}
-            onInputChange={event => setInput(event.target.value)}
-            onSubmit={onSubmit}
-            onStop={() => { void stop(); }}
-          />
-        </div>
-      </div>
+  const busy = status === "submitted" || status === "streaming";
+  useEffect(() => { if (messages.length) upsert({ id: chatId, activeStreamId: busy ? "active" : undefined }); }, [busy, chatId, messages.length, upsert]);
+  function send(text: string, messageId?: string) {
+    if (busy || !text.trim()) return;
+    history.replaceState(null, "", `/chat/${chatId}`);
+    upsert({ id: chatId, updatedAt: Date.now(), activeStreamId: "active" });
+    clearError(); setStopError("");
+    void sendMessage({ text, ...(messageId ? { messageId } : {}) });
+  }
+  function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!busy && input.trim()) { send(input); setInput(""); } }
+  async function stopReply() {
+    try {
+      const response = await fetch(`/api/chat/${chatId}/stop`, { method: "POST" });
+      if (!response.ok) throw new Error();
+      await stop(); setStopError("");
+    } catch { setStopError("Unable to stop the reply. Please try again."); }
+  }
+  return <div className="flex h-dvh min-w-0 flex-col bg-gray-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100">
+    <NavBar />
+    <Messages messages={messages} status={status} onSuggest={send} onEdit={send} onRegenerate={() => { clearError(); void regenerate(); }} />
+    <div className="shrink-0 bg-gray-100/90 dark:bg-zinc-800/90">
+      {stopError && <p role="alert" className="mx-auto max-w-3xl px-4 text-sm text-red-600">{stopError}</p>}
+      {error && <div role="alert" className="mx-auto flex max-w-3xl items-center justify-between px-4 text-sm text-red-600"><span>{error.message.includes("Too many requests") || error.message.includes("429") ? "You're sending messages too quickly." : "Unable to send your message. Please try again."}</span><button onClick={() => { clearError(); void regenerate(); }} disabled={busy} className="rounded border px-3 py-1">Retry</button></div>}
+      <ChatInput chatState={busy ? "Loading" : "Ready"} input={input} onInputChange={event => setInput(event.target.value)} onSubmit={submit} onStop={() => { void stopReply(); }} />
     </div>
-  );
+  </div>;
 };

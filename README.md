@@ -6,7 +6,7 @@ Converse is a research chatbot over openFDA OTC drug labels. It retrieves refere
 
 - Next.js 16 (App Router, Turbopack, `proxy.ts`), React 19, Node 24
 - AI SDK 7, `@ai-sdk/react` 4, `@ai-sdk/deepseek` 3
-- DeepSeek `deepseek-v4-flash`, with thinking disabled and model-controlled search
+- DeepSeek `deepseek-v4-flash`, with thinking enabled (high effort) and model-controlled search
 - Upstash Vector with hosted embeddings, Redis history, and per-user rate limits
 - Existing Lucia / AWS DynamoDB authentication
 - NextUI, Tailwind CSS, and sanitized Markdown rendering with marked / DOMPurify
@@ -43,13 +43,15 @@ For Vercel, add `DEEPSEEK_API_KEY`, optionally set `DEEPSEEK_MODEL`, and retain 
 
 The client sends only `{ id, message }` to `POST /api/chat`. The server authenticates the user, rate-limits that user (10 requests per 10 seconds), loads their stored conversation, and merges the incoming message by ID. Retrying a stored question truncates that question and later messages before appending it again.
 
-The model sees at most the latest 24 messages / 24,000 content characters (including tool results), starting on a user turn. User messages are passed through unchanged. The server offers a `searchDrugLabels` tool; the model decides whether to search and supplies a focused query, resolving drug names from the conversation. Greetings need no search, and follow-ups can reuse relevant label results already in history. There is no separate query-rewriting call or automatic search for every prompt.
+The model sees a window starting on a user turn, bounded to 40 messages and approximately 12,000 tokens. Reasoning is persisted for display and removed from outgoing history. Tool evidence older than the latest three user turns is pruned. The agent receives its request registry through typed call options and `prepareCall`, which sets tool context (the installed SDK does not accept `toolsContext` directly in `.stream()`). The module-level agent has thinking enabled at high effort, a 4096-token output budget, and reserves step four for an answer after at most three searches.
 
-Search uses the existing Vector index and hosted embeddings, keeping up to five documents with scores >=0.5. Tool calls and their label results are persisted in assistant message parts so later turns can reuse evidence. Drug claims must be grounded in relevant label excerpts, not earlier assistant answers or general model knowledge. Empty results and search failures are distinguished. Generation allows up to three search rounds, followed by a final answer step with tools disabled. Source IDs and scores from successful searches in the current response are deduplicated in assistant metadata, retaining the highest score for each ID. Instructions and prior history remain stable for best-effort DeepSeek prefix caching.
+Search uses hosted Upstash Vector embeddings, retaining up to five excerpts with scores >=0.5. Each label receives a stable conversation citation number and an optional drug/manufacturer title. Drug claims cite `[n]` anchors from tool results. The UI sanitizes Markdown, renders citation chips with excerpt tooltips, and lists sources. Legacy PR #9 `{ docs, sources, error? }` outputs remain valid and renderable. Reasoning and searches share a collapsible activity block.
 
-The chat UI renders expandable search activity entries from the SDK tool parts, showing running, completed, unavailable, or stopped searches. These display labels are UI-only; they are never appended to assistant text or model context.
+`/chat` starts a conversation and `/chat/{id}` loads it. Redis stores user-scoped `chat:{userId}:{chatId}` messages, a `:meta` hash, and a `chats:{userId}` sorted index capped at 100 conversations. Saves refresh 30-day message/meta TTLs. Existing `default` history is backfilled into the sidebar. Titles are generated with thinking disabled; chats support rename and confirmed deletion. Active chats cannot be deleted.
 
-History lives at `chat:{userId}:default` (one conversation per user), retains up to 200 messages, and expires 30 days after a save. Logging out and back in preserves it. Old session-keyed Redis history is not migrated and is orphaned. The provider stream is consumed independently; AI SDK 7's UI `onEnd` saves the completed or cancelled partial reply. Incomplete tool calls are omitted when converting history for the next model request; completed tool results remain usable. The Stop button ends the client stream. `DELETE /api/chat` clears the authenticated user's history; clearing is disabled while a reply streams.
+Streams use `resumable-stream/generic` with Upstash Redis REST SSE using the existing credentials. Pub/sub payloads are base64 encoded to preserve newlines through REST SSE and UI deltas are batched every 50ms. Reloads and second tabs attach through `GET /api/chat/{id}/stream`. Disconnects do not stop generation. `POST /api/chat/{id}/stop` accepts no body, publishes a server-side cancellation signal, and waits for partial output persistence. Redis Lua atomically claims a producer and only allows the active stream to save, so older streams cannot overwrite newer turns. Stopping must finish before a replacement producer starts. Incomplete tool calls are omitted during model conversion.
+
+The composer supports Enter, Shift+Enter, IME input and 3000 characters. Message actions copy Markdown, edit user turns, or regenerate the latest answer. Editing drops subsequent turns. Scroll up to pause following, then use Jump to latest. The sidebar becomes a drawer on mobile.
 
 Development logs include tool search queries, retrieved source IDs/scores, and `promptCacheHitTokens`. Production does not log conversation text or provider metadata.
 
@@ -67,13 +69,13 @@ npm run build
 
 Vitest covers history merging/windowing including tool evidence, model-controlled search with the AI SDK mock model, retrieval filtering and failures, persisted tool validation, search round limits, storage retention, and API behavior.
 
-Live verification requires configured services and a test login: send a greeting and confirm there is no retrieval log, ask about ibuprofen and confirm a focused tool query, then follow up about its side effects and max daily dose. Repeat a covered question to check evidence reuse, reload, stop a reply and reload, clear history, and log out/back in. Check Redis for tool results and unique message IDs and inspect the development cache logs. Check HTTP 401/403/429 responses and the default 503 gate.
+Live verification uses the existing test login with `MAINTENANCE_MODE=off`. Back up its Redis state first and restore it afterward. Check legacy history, citations and ref reuse, reasoning, reload/second-tab resume, Stop persistence, concurrent chats, edit/regenerate/copy, rename/delete, composer and scroll behavior. Repeat at desktop and 375px widths in both themes. Inspect Redis and dev logs; verify HTTP 401/403/429 and the default 503 gate.
 
 ## Data and follow-ups
 
 Download label JSON from [openFDA](https://open.fda.gov/data/downloads/) and use [the dataset notebook](python/FDA-Dataset.ipynb) as a guide.
 
-Follow-ups: migrate NextUI to HeroUI and review the unused `/api/auth` route. Lucia/DynamoDB auth is unchanged. Simultaneous conversations in multiple tabs still share the single default history; cross-tab write coordination is a follow-up. Evaluate drug-specific retrieval relevance: a focused tool query can still return labels for other drugs, in which case the assistant must acknowledge missing evidence.
+Follow-ups: migrate NextUI to HeroUI and review the unused `/api/auth` route. Lucia/DynamoDB auth is unchanged. Evaluate drug-specific retrieval relevance: a focused tool query can still return labels for other drugs, in which case the assistant must acknowledge missing evidence.
 
 ## Screenshots
 

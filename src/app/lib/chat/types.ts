@@ -3,17 +3,20 @@ import { z } from "zod";
 import type { createSearchTools } from "./retrieval";
 
 export const CHAT_ID = "default";
+export const chatIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+export type ChatSummary = { id: string; title: string; createdAt: number; updatedAt: number; activeStreamId?: string };
 export const sourceSchema = z.object({ id: z.string(), score: z.number() });
 export type ChatSource = z.infer<typeof sourceSchema>;
 export const messageMetadataSchema = z.object({
   sources: z.array(sourceSchema).optional(),
+  reasoningMs: z.number().nonnegative().optional(),
 });
 export type ChatTools = InferUITools<ReturnType<typeof createSearchTools>>;
-export type ChatMessage = UIMessage<z.infer<typeof messageMetadataSchema>, never, ChatTools>;
+export type ChatMessage = UIMessage<z.infer<typeof messageMetadataSchema>, { title: { title: string } }, ChatTools>;
 
 // Only user text is accepted from the client; history and sources belong to the server.
 export const chatRequestSchema = z.object({
-  id: z.literal(CHAT_ID),
+  id: chatIdSchema,
   message: z.object({
     id: z.string().min(1).max(128),
     role: z.literal("user"),

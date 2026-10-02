@@ -12,7 +12,7 @@ export function ToolActivity({ part, isStreaming }: { part: SearchPart; isStream
     || (output != null && typeof output === "object" && "error" in output && !!output.error);
   const stopped = (pending && !isStreaming) || part.state === "output-denied";
   const count = output != null && typeof output === "object" && "docs" in output && Array.isArray(output.docs)
-    ? output.docs.length : undefined;
+    ? output.docs.length : output != null && typeof output === "object" && "excerpts" in output && Array.isArray(output.excerpts) ? output.excerpts.length : undefined;
   const input = part.input;
   const query = part.state !== "input-streaming" && input != null && typeof input === "object"
     && "query" in input && typeof input.query === "string" ? input.query : undefined;

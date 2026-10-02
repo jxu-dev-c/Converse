@@ -1,111 +1,94 @@
-import { validateRequest } from "@/app/_auth/validate-request";
-import { mergeIncoming, selectHistoryWindow } from "@/app/lib/chat/context";
-import { chatModel, providerOptions } from "@/app/lib/chat/model";
-import { INSTRUCTIONS } from "@/app/lib/chat/prompts";
-import { createSearchTools } from "@/app/lib/chat/retrieval";
-import { clearChat, loadChat, saveChat } from "@/app/lib/chat/store";
-import { chatRequestSchema, messageMetadataSchema, type ChatMessage, type ChatSource } from "@/app/lib/chat/types";
-import { redis } from "@/app/lib/redis";
-import { Ratelimit } from "@upstash/ratelimit";
+import { guardChatRequest } from "@/app/lib/chat/http";
+import { generateTitle } from "@/app/lib/chat/title";
+import { mergeIncoming, prepareHistory } from "@/app/lib/chat/context";
+import { createCitationRegistry } from "@/app/lib/chat/citations";
+import { converseAgent } from "@/app/lib/chat/agent";
+import { beginStream, getChat, loadChat, saveChatIfActive, touchChat, renameChat } from "@/app/lib/chat/store";
+import { batchSse, stopActiveStream, streamContext, subscribe } from "@/app/lib/chat/stream";
+import { chatRequestSchema, messageMetadataSchema, type ChatMessage } from "@/app/lib/chat/types";
 import {
-  convertToModelMessages, createIdGenerator, createUIMessageStreamResponse,
-  stepCountIs, streamText, toUIMessageStream, validateUIMessages,
+  consumeStream, convertToModelMessages, createIdGenerator, createUIMessageStream, createUIMessageStreamResponse,
+  generateId, toUIMessageStream, validateUIMessages,
 } from "ai";
 import { type NextRequest } from "next/server";
-import { verifyRequestOrigin } from "lucia";
-
 export const maxDuration = 60;
-const ratelimit = new Ratelimit({
-  redis, limiter: Ratelimit.slidingWindow(10, "10 s"), prefix: "converse:chat:ratelimit",
-});
 const genericError = "Unable to complete the response. Please try again.";
 
-function hasForeignOrigin(req: NextRequest) {
-  const origin = req.headers.get("origin");
-  // Next may construct nextUrl using the bind address (e.g. 0.0.0.0).
-  // Host identifies the public address used by the browser.
-  return origin !== null && !verifyRequestOrigin(origin, [req.headers.get("host") ?? req.nextUrl.host]);
-}
-
 export async function POST(req: NextRequest) {
-  if (hasForeignOrigin(req)) return new Response("Forbidden", { status: 403 });
-  const { user } = await validateRequest();
-  if (!user) return new Response("Unauthorized", { status: 401 });
-  const { success, reset } = await ratelimit.limit(user.id);
-  if (!success) return new Response("Too many requests", {
-    status: 429,
-    headers: { "Retry-After": String(Math.max(1, Math.ceil((reset - Date.now()) / 1000))) },
-  });
-
+  const guard = await guardChatRequest(req);
+  if (guard.response) return guard.response;
+  const { user } = guard;
   const parsed = chatRequestSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return new Response("Invalid chat request", { status: 400 });
   const { id, message } = parsed.data;
-
+  const streamId = generateId();
+  const controller = new AbortController();
+  let unsubscribe: (() => Promise<void>) | undefined;
+  let merged: ChatMessage[] = [];
+  let claimed = false;
   try {
-    const sources = new Map<string, ChatSource>();
-    const tools = createSearchTools(found => {
-      for (const source of found) {
-        if (source.score > (sources.get(source.id)?.score ?? -Infinity)) sources.set(source.id, source);
-      }
+    const previous = (await getChat(user.id, id))?.meta.activeStreamId;
+    if (previous && !await stopActiveStream(user.id, id, previous)) return new Response("Previous reply is still stopping. Please retry.", { status: 409 });
+    const isNew = await touchChat(user.id, id);
+    const title = isNew ? generateTitle(message.parts.map(part => part.text).join(""), controller.signal) : undefined;
+    const tools = converseAgent.tools;
+    merged = await validateUIMessages<ChatMessage>({
+      messages: mergeIncoming(await loadChat(user.id, id), message), metadataSchema: messageMetadataSchema.optional(), tools,
     });
-    const merged = await validateUIMessages<ChatMessage>({
-      messages: mergeIncoming(await loadChat(user.id, id), message),
-      metadataSchema: messageMetadataSchema.optional(),
-      tools,
-    });
-    const window = selectHistoryWindow(merged);
-
-    const result = streamText({
-      model: chatModel,
-      instructions: INSTRUCTIONS,
-      messages: await convertToModelMessages(window, { tools, ignoreIncompleteToolCalls: true }),
-      tools,
-      toolChoice: "auto",
-      stopWhen: stepCountIs(4),
-      // Reserve the fourth step for an answer after up to three search rounds.
-      prepareStep: ({ stepNumber }) => stepNumber >= 3 ? { toolChoice: "none", activeTools: [] } : undefined,
-      maxOutputTokens: 1024,
-      providerOptions,
-      onEnd: ({ providerMetadata }) => {
-        if (process.env.NODE_ENV === "development") {
-          console.info("DeepSeek cache", {
-            promptCacheHitTokens: providerMetadata?.deepseek?.promptCacheHitTokens,
-          });
+    unsubscribe = await subscribe(`converse:stop:${streamId}`, () => controller.abort());
+    claimed = await beginStream(user.id, id, streamId, merged);
+    if (!claimed) { await unsubscribe(); return new Response("Chat is already streaming. Please retry.", { status: 409 }); }
+    const reasoningStarts = new Map<string, number>();
+    let reasoningMs = 0;
+    const stream = createUIMessageStream<ChatMessage>({
+      originalMessages: merged, generateId: createIdGenerator({ prefix: "msg", size: 16 }),
+      execute: async ({ writer }) => {
+        const result = await converseAgent.stream({
+          messages: await convertToModelMessages(prepareHistory(merged), { tools, ignoreIncompleteToolCalls: true }),
+          options: { registry: createCitationRegistry(merged) },
+          abortSignal: AbortSignal.any([controller.signal, AbortSignal.timeout(110_000)]),
+        });
+        writer.merge(toUIMessageStream({
+          stream: result.stream, tools,
+          messageMetadata: ({ part }) => {
+            if (part.type === "reasoning-start") reasoningStarts.set(part.id, Date.now());
+            if (part.type === "reasoning-end") {
+              reasoningMs += Date.now() - (reasoningStarts.get(part.id) ?? Date.now());
+              reasoningStarts.delete(part.id);
+            }
+            if (part.type === "abort") {
+              for (const start of reasoningStarts.values()) reasoningMs += Date.now() - start;
+              reasoningStarts.clear();
+            }
+            return ["start", "reasoning-end", "finish", "abort"].includes(part.type) ? { reasoningMs } : undefined;
+          }, onError: () => genericError,
+        }));
+        if (title) {
+          const value = await title;
+          await renameChat(user.id, id, value);
+          writer.write({ type: "data-title", data: { title: value }, transient: true });
         }
       },
-      // Avoid the SDK's default logging of provider errors (which can include request details).
-      onError: () => console.error("Chat generation failed"),
+      onEnd: async ({ messages }) => {
+        try { await saveChatIfActive(user.id, id, streamId, messages); }
+        finally { await unsubscribe?.(); }
+      }, onError: () => genericError,
     });
-    // Drain the provider independently; the UI stream's onEnd also runs on cancellation.
-    void result.consumeStream({ onError: () => console.error("Chat stream consumption failed") });
-    return createUIMessageStreamResponse({
-      stream: toUIMessageStream({
-        stream: result.stream,
-        tools,
-        originalMessages: merged,
-        generateMessageId: createIdGenerator({ prefix: "msg", size: 16 }),
-        messageMetadata: ({ part }) => ["start", "tool-result", "finish"].includes(part.type)
-          ? { sources: [...sources.values()] } : undefined,
-        onEnd: async ({ messages }) => {
-          await saveChat(user.id, messages, id);
-        },
-        onError: () => genericError,
-      }),
+    let registration: Promise<void> | undefined;
+    const response = createUIMessageStreamResponse({ stream,
+      consumeSseStream: ({ stream: sse }) => {
+        registration = streamContext.createNewResumableStream(streamId, () => batchSse(sse)).then(buffered => {
+          if (buffered) void consumeStream({ stream: buffered, onError: () => console.error("Chat stream consumption failed") });
+        });
+      },
     });
+    await registration;
+    return response;
   } catch {
+    controller.abort();
+    await unsubscribe?.().catch(() => {});
+    if (claimed) await saveChatIfActive(user.id, id, streamId, merged).catch(() => {});
     console.error("Chat request failed");
     return new Response(genericError, { status: 500 });
-  }
-}
-
-export async function DELETE(req: NextRequest) {
-  if (hasForeignOrigin(req)) return new Response("Forbidden", { status: 403 });
-  const { user } = await validateRequest();
-  if (!user) return new Response("Unauthorized", { status: 401 });
-  try {
-    await clearChat(user.id);
-    return Response.json({ success: true });
-  } catch {
-    return new Response("Unable to clear chat history", { status: 500 });
   }
 }

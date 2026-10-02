@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { simulateReadableStream, type MockLanguageModelV4 } from "ai/test";
 import type { ChatMessage } from "@/app/lib/chat/types";
-import { POST, DELETE } from "./route";
+import { POST } from "./route";
 
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(), limit: vi.fn(), load: vi.fn(), save: vi.fn(), clear: vi.fn(),
-  query: vi.fn(), stream: vi.fn(),
+  query: vi.fn(), stream: vi.fn(), touch: vi.fn(), rename: vi.fn(), title: vi.fn(), get: vi.fn(), begin: vi.fn(), subscribe: vi.fn(), unsubscribe: vi.fn(), stop: vi.fn(),
 }));
 vi.mock("@/app/_auth/validate-request", () => ({ validateRequest: mocks.auth }));
 vi.mock("@/app/lib/redis", () => ({ redis: {} }));
@@ -14,7 +14,9 @@ vi.mock("@upstash/ratelimit", () => ({ Ratelimit: class {
   static slidingWindow() { return {}; }
   limit = mocks.limit;
 } }));
-vi.mock("@/app/lib/chat/store", () => ({ loadChat: mocks.load, saveChat: mocks.save, clearChat: mocks.clear }));
+vi.mock("@/app/lib/chat/store", () => ({ loadChat: mocks.load, saveChatIfActive: (user: string, id: string, stream: string, messages: ChatMessage[]) => mocks.save(user, messages, id), getChat: mocks.get, beginStream: mocks.begin, touchChat: mocks.touch, renameChat: mocks.rename }));
+vi.mock("@/app/lib/chat/stream", () => ({ batchSse: (stream: ReadableStream<string>) => stream, subscribe: mocks.subscribe, stopActiveStream: mocks.stop, streamContext: { createNewResumableStream: async (_id: string, make: () => ReadableStream<string>) => make() } }));
+vi.mock("@/app/lib/chat/title", () => ({ generateTitle: mocks.title }));
 vi.mock("@upstash/vector", () => ({ Index: class {
   static fromEnv() { return { query: mocks.query }; }
 } }));
@@ -62,6 +64,12 @@ beforeEach(() => {
   mocks.query.mockResolvedValue([{ id: "label-id", score: 0.8, data: "Ibuprofen label evidence" }]);
   mocks.stream.mockImplementation(() => textStream());
   mocks.save.mockResolvedValue(undefined);
+  mocks.get.mockResolvedValue(null);
+  mocks.begin.mockResolvedValue(true);
+  mocks.subscribe.mockResolvedValue(mocks.unsubscribe);
+  mocks.stop.mockResolvedValue(true);
+  mocks.touch.mockResolvedValue(false);
+  mocks.title.mockResolvedValue("Ibuprofen label uses");
 });
 
 describe("chat API boundaries", () => {
@@ -76,13 +84,13 @@ describe("chat API boundaries", () => {
   });
   it("uses the browser-facing host rather than the Next bind address for both methods", async () => {
     mocks.auth.mockResolvedValue({ user: null });
-    for (const method of ["POST", "DELETE"]) {
+    for (const method of ["POST"]) {
       const req = new NextRequest("http://0.0.0.0:3000/api/chat", {
         method, headers: { host: "localhost:3000", origin: "http://localhost:3000" },
       });
-      expect((await (method === "POST" ? POST(req) : DELETE(req))).status).toBe(401);
+      expect((await POST(req)).status).toBe(401);
       req.headers.set("origin", "https://foreign.example");
-      expect((await (method === "POST" ? POST(req) : DELETE(req))).status).toBe(403);
+      expect((await POST(req)).status).toBe(403);
     }
   });
   it("rate limits by the stable user ID", async () => {
@@ -94,7 +102,7 @@ describe("chat API boundaries", () => {
     expect(mocks.load).not.toHaveBeenCalled();
   });
   it.each([
-    { id: "other", message: question },
+    { id: "../other", message: question },
     { id: "default", message: { ...question, role: "system" } },
     { id: "default", message: { ...question, parts: [{ type: "text", text: " " }] } },
     { id: "default", message: { ...question, parts: [{ type: "text", text: "x".repeat(3001) }] } },
@@ -122,7 +130,7 @@ it("streams without searching when the model does not call the tool", async () =
   const [userId, messages, chatId] = mocks.save.mock.calls[0] as [string, ChatMessage[], string];
   expect([userId, chatId]).toEqual(["stable-user", "default"]);
   expect(messages.slice(0, 3)).toEqual([...history, question]);
-  expect(messages[3].metadata).toEqual({ sources: [] });
+  expect(messages[3].metadata).toEqual({ reasoningMs: 0 });
   expect(new Set(messages.map(message => message.id)).size).toBe(4);
   expect(JSON.stringify(messages)).not.toContain("reference_material");
   expect(mocks.query).not.toHaveBeenCalled();
@@ -147,9 +155,9 @@ it("executes the model's query, streams its answer, and persists evidence for fo
   expect(stored[0]).toEqual(question);
   expect(stored[1].parts).toContainEqual(expect.objectContaining({
     type: "tool-searchDrugLabels", state: "output-available", input: { query: "ibuprofen uses" },
-    output: { docs: ["Ibuprofen label evidence"], sources: [{ id: "label-id", score: 0.8 }] },
+    output: { excerpts: [{ ref: 1, id: "label-id", text: "Ibuprofen label evidence", score: 0.8 }] },
   }));
-  expect(stored[1].metadata).toEqual({ sources: [{ id: "label-id", score: 0.8 }] });
+  expect(stored[1].metadata).toEqual({ reasoningMs: 0 });
 
   mocks.load.mockResolvedValue(stored);
   const followUp = { ...question, id: "follow-up", parts: [{ type: "text", text: "Can you repeat its uses?" }] };
@@ -172,7 +180,7 @@ it("aggregates and deduplicates sources from multiple searches", async () => {
   expect(mocks.query).toHaveBeenCalledTimes(2);
   expect(mocks.stream).toHaveBeenCalledTimes(3);
   const assistant = (mocks.save.mock.calls[0][1] as ChatMessage[]).at(-1)!;
-  expect(assistant.metadata).toEqual({ sources: [{ id: "label-id", score: 0.9 }, { id: "warnings", score: 0.7 }] });
+  expect(assistant.metadata).toEqual({ reasoningMs: 0 });
   expect(assistant.parts.filter(part => part.type === "tool-searchDrugLabels")).toHaveLength(2);
 });
 
@@ -212,11 +220,11 @@ it.each([false, true])("lets the model answer when search is empty or unavailabl
     expect(mocks.stream).toHaveBeenCalledTimes(2);
     const output = JSON.stringify(mocks.stream.mock.calls[1][0].prompt);
     expect(output.includes("Search unavailable")).toBe(failure);
-    expect((mocks.save.mock.calls[0][1] as ChatMessage[]).at(-1)!.metadata).toEqual({ sources: [] });
+    expect((mocks.save.mock.calls[0][1] as ChatMessage[]).at(-1)!.metadata).toEqual({ reasoningMs: 0 });
   } finally { log.mockRestore(); }
 });
 
-it("persists a partial assistant response and retrieved sources when the client disconnects", async () => {
+it("finishes and persists the response independently when the client disconnects", async () => {
   mocks.stream.mockResolvedValueOnce(searchStream("ibuprofen uses"));
   mocks.stream.mockImplementation(() => textStream("Ibuprofen relieves pain.", 30));
   const response = await POST(request());
@@ -233,52 +241,53 @@ it("persists a partial assistant response and retrieved sources when the client 
   const messages = mocks.save.mock.calls[0][1] as ChatMessage[];
   expect(messages[0]).toEqual(question);
   const text = messages.at(-1)!.parts.filter(part => part.type === "text").map(part => part.text).join("");
-  expect(text).toBe("Ibuprofen ");
-  expect(messages.at(-1)!.metadata).toEqual({ sources: [{ id: "label-id", score: 0.8 }] });
+  expect(text).toBe("Ibuprofen relieves pain.");
+  expect(messages.at(-1)!.metadata).toEqual({ reasoningMs: 0 });
 });
 
-it("resumes a conversation cancelled during tool input without an unmatched tool call", async () => {
-  let provider!: ReadableStreamDefaultController<StreamChunk>;
-  mocks.stream.mockResolvedValueOnce({ stream: new ReadableStream<StreamChunk>({ start(controller) {
-    provider = controller;
-    controller.enqueue({ type: "stream-start", warnings: [] });
-    controller.enqueue({ type: "tool-input-start", id: "pending", toolName: "searchDrugLabels" });
-    controller.enqueue({ type: "tool-input-delta", id: "pending", delta: '{"query":"ibu' });
-  } }) });
+it("aborts on a server stop signal and saves the partial before a newer stream", async () => {
+  mocks.stream.mockImplementation(() => textStream("Ibuprofen relieves pain.", 80));
   const response = await POST(request());
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   while (true) {
     const { done, value } = await reader.read();
-    if (done || decoder.decode(value).includes("tool-input-delta")) break;
+    if (done || decoder.decode(value).includes('"type":"text-delta"')) break;
   }
-  await reader.cancel();
+  mocks.subscribe.mock.calls[0][1]("stop");
+  while (!(await reader.read()).done) { /* drain abort */ }
   await vi.waitFor(() => expect(mocks.save).toHaveBeenCalledOnce());
-  const stored = mocks.save.mock.calls[0][1] as ChatMessage[];
-  expect(stored.at(-1)!.parts).toContainEqual(expect.objectContaining({
-    type: "tool-searchDrugLabels", toolCallId: "pending", state: "input-streaming",
-  }));
-
-  // Finish the independently consumed provider stream before starting another turn.
-  provider.enqueue({ type: "tool-input-end", id: "pending" });
-  provider.enqueue({ type: "tool-call", toolCallId: "pending", toolName: "searchDrugLabels", input: '{"query":"ibuprofen"}' });
-  provider.enqueue({ type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage });
-  provider.close();
-  await vi.waitFor(() => expect(mocks.stream).toHaveBeenCalledTimes(2));
-
-  mocks.load.mockResolvedValue(stored);
-  const next = await POST(request({ id: "default", message: { ...question, id: "next" } }));
-  expect(next.status).toBe(200);
-  await next.text();
-  expect(JSON.stringify(mocks.stream.mock.calls[2][0].prompt)).not.toContain('"toolCallId":"pending"');
+  const messages = mocks.save.mock.calls[0][1] as ChatMessage[];
+  expect(messages.at(-1)?.parts.filter(part => part.type === "text").map(part => part.text).join("")).toBe("Ibuprofen ");
+  expect(mocks.unsubscribe).toHaveBeenCalled();
+});
+it("waits for a previous producer and rejects a concurrent claim", async () => {
+  mocks.get.mockResolvedValue({ meta: { activeStreamId: "old" } });
+  mocks.begin.mockResolvedValue(false);
+  expect((await POST(request())).status).toBe(409);
+  expect(mocks.stop).toHaveBeenCalledWith("stable-user", "default", "old");
+  expect(mocks.stream).not.toHaveBeenCalled();
 });
 
-it("authenticates and origin-checks deletion", async () => {
-  const req = new NextRequest("http://localhost:3000/api/chat", { method: "DELETE" });
-  expect((await DELETE(req)).status).toBe(200);
-  expect(mocks.clear).toHaveBeenCalledWith("stable-user");
-  mocks.auth.mockResolvedValue({ user: null });
-  expect((await DELETE(req)).status).toBe(401);
-  const foreign = new NextRequest("http://localhost:3000/api/chat", { method: "DELETE", headers: { origin: "https://foreign.example" } });
-  expect((await DELETE(foreign)).status).toBe(403);
+it("accepts any valid chat ID and emits a transient title only for the first message", async () => {
+  mocks.touch.mockResolvedValueOnce(true);
+  const first = await (await POST(request({ id: "chat_123", message: question }))).text();
+  expect(first).toContain('"type":"data-title"');
+  expect(first).toContain('"transient":true');
+  expect(mocks.rename).toHaveBeenCalledWith("stable-user", "chat_123", "Ibuprofen label uses");
+  expect(JSON.stringify(mocks.save.mock.calls[0][1])).not.toContain("data-title");
+  expect(await (await POST(request())).text()).not.toContain("data-title");
+});
+it("persists reasoning but strips it from outgoing history", async () => {
+  mocks.stream.mockResolvedValueOnce(modelStream([
+    { type: "reasoning-start", id: "r" }, { type: "reasoning-delta", id: "r", delta: "Think about evidence" }, { type: "reasoning-end", id: "r" },
+    { type: "text-start", id: "t" }, { type: "text-delta", id: "t", delta: "answer" }, { type: "text-end", id: "t" },
+  ]));
+  await (await POST(request())).text();
+  const stored = mocks.save.mock.calls[0][1] as ChatMessage[];
+  expect(stored.at(-1)?.parts).toContainEqual(expect.objectContaining({ type: "reasoning", text: "Think about evidence" }));
+  expect(stored.at(-1)?.metadata?.reasoningMs).toBeGreaterThanOrEqual(0);
+  mocks.load.mockResolvedValue(stored);
+  await (await POST(request({ id: "default", message: { ...question, id: "next" } }))).text();
+  expect(JSON.stringify(mocks.stream.mock.calls[1][0].prompt)).not.toContain("Think about evidence");
 });

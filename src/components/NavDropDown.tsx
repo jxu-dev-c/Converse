@@ -4,9 +4,8 @@ import {
   DropdownMenu,
   DropdownItem,
   Avatar,
-  Spinner,
 } from "@nextui-org/react";
-import { Notebook, Cog, LogOut, Trash2 } from "lucide-react";
+import { LogOut } from "lucide-react";
 import React from "react";
 import { useRouter } from "next/navigation";
 import { startTransition, useActionState } from "react";
@@ -20,15 +19,7 @@ const initialState = {
   
 
 
-export default function NavDropDown({
-  clearHistory,
-  buttonLoading,
-  clearDisabled,
-}: {
-  clearHistory: () => void;
-  buttonLoading: boolean;
-  clearDisabled: boolean;
-}) {
+export default function NavDropDown() {
   const [logOutState, formAction] = useActionState(SignOut, initialState);
   const router = useRouter();
 
@@ -52,7 +43,6 @@ export default function NavDropDown({
             showFallback
             name="user"
             size="md"
-            src="https://images.unsplash.com/broken"
             className="cursor-pointer"
           />
         </DropdownTrigger>
@@ -60,14 +50,7 @@ export default function NavDropDown({
           variant="solid"
           aria-label="Dropdown menu with icons"
           className="text-black dark:text-white"
-          disabledKeys={clearDisabled ? ["clear"] : []}
         >
-          <DropdownItem key="profile" startContent={<Notebook />}>
-            Profile
-          </DropdownItem>
-          <DropdownItem key="settings" startContent={<Cog />} showDivider>
-            Settings
-          </DropdownItem>
           <DropdownItem
             key={"logout"}
             color="danger"
@@ -77,19 +60,9 @@ export default function NavDropDown({
           >
             Sign Out
           </DropdownItem>
-          <DropdownItem
-            key={"clear"}
-            aria-label="clear-history"
-            onClick={clearHistory}
-            color="danger"
-            className="text-danger"
-            startContent={buttonLoading ? <Spinner /> : <Trash2 />}
-          >
-            Clear History
-          </DropdownItem>
+
         </DropdownMenu>
       </Dropdown>
-      <div className="flex items-center mr-2"></div>
     </>
   );
 }

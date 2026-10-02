@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { convertToModelMessages, validateUIMessages } from "ai";
-import { mergeIncoming, selectHistoryWindow } from "./context";
+import { mergeIncoming, prepareHistory } from "./context";
 import { createSearchTools } from "./retrieval";
 import type { ChatMessage } from "./types";
 
@@ -24,21 +24,21 @@ describe("mergeIncoming", () => {
   });
 });
 
-describe("selectHistoryWindow", () => {
+describe("prepareHistory", () => {
   it("keeps recent messages and drops an orphaned leading assistant", () => {
-    expect(selectHistoryWindow(history, { maxMessages: 3 })).toEqual(history.slice(2));
+    expect(prepareHistory(history, { maxMessages: 3 })).toEqual(history.slice(2));
   });
-  it("enforces the character budget", () => {
-    expect(selectHistoryWindow(history, { maxChars: 8 })).toEqual(history.slice(2));
-    expect(selectHistoryWindow(history, { maxChars: 3 })).toEqual([]);
+  it("enforces the estimated token budget", () => {
+    expect(prepareHistory(history, { maxTokens: 16 })).toEqual(history.slice(2));
+    expect(prepareHistory(history, { maxTokens: 3 })).toEqual([]);
   });
   it("handles empty input and budgets", () => {
-    expect(selectHistoryWindow([])).toEqual([]);
-    expect(selectHistoryWindow(history, { maxMessages: 0 })).toEqual([]);
+    expect(prepareHistory([])).toEqual([]);
+    expect(prepareHistory(history, { maxMessages: 0 })).toEqual([]);
   });
-  it("uses the 24-message and 24000-character defaults", () => {
+  it("uses the 40-message and 12000-token defaults", () => {
     const messages = Array.from({ length: 40 }, (_, i) => msg(String(i), i % 2 ? "assistant" : "user", "x".repeat(1000)));
-    expect(selectHistoryWindow(messages)).toEqual(messages.slice(-24));
+    expect(prepareHistory(messages)).toEqual(messages);
   });
 });
 
@@ -48,8 +48,8 @@ it("counts tool evidence against the history budget and retains whole turns", ()
     input: { query: "ibuprofen uses" }, output: { docs: ["x".repeat(1000)], sources: [] },
   }] };
   const messages = [msg("u", "user"), evidence, msg("next", "user")];
-  expect(selectHistoryWindow(messages, { maxChars: 100 })).toEqual(messages.slice(-1));
-  expect(selectHistoryWindow(messages, { maxChars: 2000 })).toEqual(messages);
+  expect(prepareHistory(messages, { maxTokens: 100 })).toEqual(messages.slice(-1));
+  expect(prepareHistory(messages, { maxTokens: 2000 })).toEqual(messages);
 });
 
 it("omits unfinished tool calls after cancellation, preserving completed evidence", async () => {
@@ -74,4 +74,15 @@ it("validates stored tool outputs", async () => {
     input: { query: "ibuprofen" }, output: { docs: [123], sources: [] },
   }] }];
   await expect(validateUIMessages({ messages, tools })).rejects.toThrow();
+});
+
+it("strips reasoning without mutating stored messages and prunes evidence older than three user turns", () => {
+  const old: ChatMessage = { id: "old", role: "assistant", parts: [
+    { type: "reasoning", text: "private thought" },
+    { type: "tool-searchDrugLabels", toolCallId: "old", state: "output-available", input: { query: "ibuprofen" }, output: { docs: ["evidence"], sources: [] } },
+    { type: "text", text: "answer" },
+  ] };
+  const prepared = prepareHistory([msg("u0", "user"), old, msg("u1", "user"), msg("u2", "user"), msg("u3", "user")]);
+  expect(prepared[1].parts).toEqual([{ type: "text", text: "answer" }]);
+  expect(old.parts).toHaveLength(3);
 });
