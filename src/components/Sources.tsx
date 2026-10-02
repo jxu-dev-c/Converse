@@ -10,7 +10,9 @@ export function Sources({ message, citations }: { message: ChatMessage; citation
   });
   if (!sources.length) return null;
   return <footer className="border-t border-zinc-300 pt-2 text-xs text-zinc-600 dark:border-zinc-600 dark:text-zinc-400" aria-label="Sources">
-    <p className="font-medium">Sources</p>
-    {sources.map(source => <p key={source.ref}>[{source.ref}] {source.title ?? "OTC label"}</p>)}
+    <details>
+      <summary className="cursor-pointer font-medium">Sources ({sources.length})</summary>
+      {sources.map(source => <p key={source.ref}>[{source.ref}] {source.title ?? "OTC label"}</p>)}
+    </details>
   </footer>;
 }
