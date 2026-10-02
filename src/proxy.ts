@@ -1,7 +1,14 @@
 import { type NextRequest, NextResponse } from "next/server";
 
 // Temporary maintenance gate: blocks pages, login actions, and all API routes.
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
+  if (process.env.MAINTENANCE_MODE === "off") {
+    if (req.nextUrl.pathname === "/") {
+      const destination = req.cookies.has("auth_session") ? "/chat" : "/start/log-in";
+      return NextResponse.redirect(new URL(destination, req.url));
+    }
+    return NextResponse.next();
+  }
   if (req.nextUrl.pathname.startsWith("/api/") || req.method !== "GET" && req.method !== "HEAD") {
     return NextResponse.json({ error: "Service temporarily unavailable for maintenance" },
       { status: 503, headers: { "Retry-After": "3600", "Cache-Control": "no-store" } });
