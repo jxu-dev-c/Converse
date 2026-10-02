@@ -5,7 +5,7 @@ import {
   DropdownItem,
   Avatar,
 } from "@nextui-org/react";
-import { Notebook, Cog, LogOut } from "lucide-react";
+import { LogOut } from "lucide-react";
 import React from "react";
 import { useRouter } from "next/navigation";
 import { startTransition, useActionState } from "react";
@@ -43,7 +43,6 @@ export default function NavDropDown() {
             showFallback
             name="user"
             size="md"
-            src="https://images.unsplash.com/broken"
             className="cursor-pointer"
           />
         </DropdownTrigger>
@@ -52,12 +51,6 @@ export default function NavDropDown() {
           aria-label="Dropdown menu with icons"
           className="text-black dark:text-white"
         >
-          <DropdownItem key="profile" startContent={<Notebook />}>
-            Profile
-          </DropdownItem>
-          <DropdownItem key="settings" startContent={<Cog />} showDivider>
-            Settings
-          </DropdownItem>
           <DropdownItem
             key={"logout"}
             color="danger"
@@ -70,7 +63,6 @@ export default function NavDropDown() {
 
         </DropdownMenu>
       </Dropdown>
-      <div className="flex items-center mr-2"></div>
     </>
   );
 }
