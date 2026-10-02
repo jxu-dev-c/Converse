@@ -51,14 +51,14 @@ describe("withReferenceMaterial", () => {
     const result = withReferenceMaterial(messages, ["drug label"]);
     expect(result.slice(0, 2)).toEqual(messages.slice(0, 2));
     expect(result[0]).toBe(messages[0]);
-    expect(result[2].content).toContain("<reference_material>");
+    expect(result[2].content).toContain('<reference_material source="knowledge_base">');
     expect(result[2].content).toContain("side effects?");
     expect(messages[2].content).toBe("side effects?");
   });
   it("supports multipart content and empty retrieval results", () => {
     const messages: ModelMessage[] = [{ role: "user", content: [{ type: "text", text: "question" }] }];
     expect(withReferenceMaterial(messages, [])[0].content).toEqual([
-      { type: "text", text: "<reference_material>\n[]\n</reference_material>\n\n" },
+      { type: "text", text: '<reference_material source="knowledge_base">\n[]\n</reference_material>\n\n' },
       { type: "text", text: "question" },
     ]);
   });

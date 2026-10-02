@@ -30,7 +30,7 @@ export function withReferenceMaterial(messages: ModelMessage[], docs: string[]):
   const latestUserIndex = messages.findLastIndex(message => message.role === "user");
   return messages.map((message, index) => {
     if (index !== latestUserIndex || message.role !== "user") return message;
-    const reference = `<reference_material>\n${JSON.stringify(docs)}\n</reference_material>\n\n`;
+    const reference = `<reference_material source="knowledge_base">\n${JSON.stringify(docs)}\n</reference_material>\n\n`;
     if (typeof message.content === "string") {
       return { ...message, content: reference + message.content };
     }
