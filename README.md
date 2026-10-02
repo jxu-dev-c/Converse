@@ -83,3 +83,5 @@ Follow-ups: migrate NextUI to HeroUI and review the unused `/api/auth` route. Lu
 Reasoning is persisted for display, but stripped from outgoing history. History is bounded to 40 messages / approximately 12k tokens; tool evidence older than three user turns is dropped. The agent reserves step four for an answer, with a 4096-token output budget.
 
 Label search assigns conversation-wide citation numbers and includes optional drug/manufacturer titles. Answers render sanitized inline citation chips and a Sources footer. PR #9 tool output remains readable.
+
+Reasoning and search traces share an activity block. It opens while the agent works and collapses when answer text begins; saved messages can be expanded for inspection.
