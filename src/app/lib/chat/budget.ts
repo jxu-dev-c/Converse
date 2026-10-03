@@ -39,6 +39,13 @@ export interface CostReservation {
   settle(actualUsd?: number): Promise<void>;
 }
 
+export interface WeeklyBudgetSnapshot {
+  limitUsd: number;
+  usedUsd: number;
+  remainingUsd: number;
+  resetsAt: number;
+}
+
 export class WeeklyBudget {
   readonly limitUsd: number;
   private readonly limitUnits: number;
@@ -51,13 +58,23 @@ export class WeeklyBudget {
 
   private key(startsAt: number) { return `converse:ai-budget:${this.userId}:${startsAt}`; }
 
-  async assertAvailable() {
+  async getSnapshot(): Promise<WeeklyBudgetSnapshot> {
     const week = budgetWeek();
     let used: number;
     try { used = Number(await redis.hget(this.key(week.startsAt), "total") ?? 0); }
     catch { throw new BudgetUnavailableError(); }
     if (!Number.isSafeInteger(used) || used < 0) throw new BudgetUnavailableError();
-    if (used >= this.limitUnits) throw new WeeklyBudgetExceededError(this.limitUsd, week.resetsAt);
+    return {
+      limitUsd: this.limitUsd,
+      usedUsd: used / USD_SCALE,
+      remainingUsd: Math.max(0, this.limitUnits - used) / USD_SCALE,
+      resetsAt: week.resetsAt,
+    };
+  }
+
+  async assertAvailable() {
+    const snapshot = await this.getSnapshot();
+    if (snapshot.remainingUsd === 0) throw new WeeklyBudgetExceededError(this.limitUsd, snapshot.resetsAt);
   }
 
   async reserve(maximumUsd: number): Promise<CostReservation> {
