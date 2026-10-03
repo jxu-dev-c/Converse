@@ -9,7 +9,6 @@ import {
   PopoverTrigger,
 } from "@nextui-org/react";
 import { ArrowRight, Eye, EyeOff } from "lucide-react";
-import { Icon } from "@iconify/react";
 import validate from "@/app/lib/validate";
 import PasswordValidator from "./PasswordValidator";
 import { logIn } from "@/app/_action/LogIn";
@@ -68,33 +67,33 @@ export default function SignUpForm({ isNewUser = false }: SignUpFormProps) {
       return;
     }
     if (formState.status === 200 || formState.status === 800) {
-      console.log("User signed up successfully");
       // client-side redirect
       router.push("/chat");
     }
-    if (formState.status === 500) {
-      console.log("User signup failed");
-      setIsButtonLoading(false);
-      setErrorMsg("Oops! Something went wrong on our end. Please try again.");
-      showWarning();
-    }
-    if (formState.status === 409) {
-      console.log("User already exists");
-      setIsButtonLoading(false);
-      setErrorMsg("Looks like you already have an account. Please log in.");
-      showWarning();
-    }
-    if (formState.status === 401) {
-      setIsButtonLoading(false);
-      setErrorMsg("Hey, Please check your email or password.");
-      showWarning();
-    }
-    if (formState.status === 404) {
-      setIsButtonLoading(false);
-      setErrorMsg("User not found. Please sign up first.");
+    setIsButtonLoading(false);
+    const messages: Record<number, string> = {
+      400: formState.message || "Please check your email and password requirements.",
+      401: "Incorrect email or password",
+      403: "Verify your email first — we sent a new link.",
+      429: "Too many attempts. Please try again later.",
+      500: "Oops! Something went wrong on our end. Please try again.",
+    };
+    const message = messages[formState.status ?? 900];
+    if (message) {
+      setErrorMsg(message);
       showWarning();
     }
   }, [formState, router]);
+
+  if (isNewUser && formState.status === 202) {
+    return (
+      <div className="max-w-md mx-auto flex flex-col gap-4" role="status">
+        <h1 className="text-2xl font-semibold">Check your inbox</h1>
+        <p>Check your inbox at {emailValue} for the next step.</p>
+        <Link href="/start/log-in" className="high-light-link">Back to log in</Link>
+      </div>
+    );
+  }
 
   return (
     <form
@@ -119,6 +118,8 @@ export default function SignUpForm({ isNewUser = false }: SignUpFormProps) {
           onBlur={() => {
             validate(emailValue, "email") ? setIsEmailInvalid(false) : warnEmail();
           }}
+          isRequired
+          autoComplete="email"
           label="Email"
           variant="bordered"
           color={isEmailInvalid ? "danger" : "default"}
@@ -127,6 +128,8 @@ export default function SignUpForm({ isNewUser = false }: SignUpFormProps) {
           errorMessage="Please enter a valid email address"
         />
         <Input
+          isRequired
+          autoComplete={isNewUser ? "new-password" : "current-password"}
           label="Password"
           value={PWvalue}
           name="password"
@@ -190,6 +193,9 @@ export default function SignUpForm({ isNewUser = false }: SignUpFormProps) {
 
         {!isNewUser && (
           <>
+            <Link href="/start/forgot-password" className="high-light-link p-2">
+              Forgot password?
+            </Link>
             <Divider className="w-40" />
             <Link href="/start/sign-up" className="high-light-link p-2">
               Don&apos;t have an account?
@@ -205,27 +211,3 @@ export default function SignUpForm({ isNewUser = false }: SignUpFormProps) {
     </form>
   );
 }
-
-// import React from "react";
-// import {, Button} from "@nextui-org/react";
-
-// export default function App() {
-//   const [isOpen, setIsOpen] = React.useState(false);
-
-//   return (
-//     <div className="flex flex-col gap-2">
-// <Popover isOpen={isOpen} onOpenChange={(open) => setIsOpen(open)}>
-//   <PopoverTrigger>
-//     <Button>Open Popover</Button>
-//   </PopoverTrigger>
-//   <PopoverContent>
-//     <div className="px-1 py-2">
-//       <div className="text-small font-bold">Popover Content</div>
-//       <div className="text-tiny">This is the popover content</div>
-//     </div>
-//   </PopoverContent>
-// </Popover>
-//       <p className="text-small text-default-400">Open: {isOpen ? "true" : "false"}</p>
-//     </div>
-//   );
-// }

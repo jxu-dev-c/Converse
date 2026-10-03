@@ -7,6 +7,7 @@ export interface UserType {
   email: string;
   password: string;
   role: string;
+  emailVerified?: boolean;
   // createdAt: Date;
   // updatedAt: Date;
 }

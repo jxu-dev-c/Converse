@@ -1,45 +1,44 @@
 "use server";
-// Need to Seperate Sign Up and Log In to different file because they can't work when put together
-// https://github.com/vercel/next.js/issues/49259
-// suggested method of seperating not working;
-//  TODO: find out how to set cookie in a server action
-import { addUser } from "@/app/_controller/user";
-import { revalidatePath } from "next/cache";
-import { lucia, purgeRemainingSessions } from "../_auth/lucia";
-import { cookies } from "next/headers";
 
+import { after } from "next/server";
+import { addUser } from "@/app/_controller/user";
+import { isStrongPassword } from "@/app/lib/password";
+import { clientIp, signUpIpLimit, verificationEmailLimit } from "@/app/lib/auth/limits";
+import { createToken } from "@/app/lib/auth/tokens";
+import { sendAccountExistsEmail, sendVerificationEmail } from "@/app/lib/auth/email";
+import validate from "@/app/lib/validate";
+import type { UserOutputType } from "../_schema/user";
 
 export interface returnData {
-  userOutput?: any;
+  userOutput?: UserOutputType | null;
   status?: number;
+  message?: string;
 }
 
-export async function signUp(
-  prevState: any,
-  formData: FormData
-): Promise<returnData> {
-  "use server";
-
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
-  const role = "user";
+export async function signUp(_prevState: returnData, formData: FormData): Promise<returnData> {
+  const email = formData.get("email");
+  const password = formData.get("password");
   try {
-    const res = await addUser({ email, password, role });
-    if (!res?.userOutput) {
-      return res;
+    if (!(await signUpIpLimit.limit(await clientIp())).success) return { status: 429 };
+    if (typeof email !== "string" || !validate(email, "email")
+      || typeof password !== "string" || !isStrongPassword(password)) {
+      return { status: 400, message: "Please enter a valid email and a password that meets all requirements." };
     }
-    const session = await lucia.createSession(res.userOutput.id, {
-      email,
-      role,
+    // Both limits precede the conditional user write, regardless of account existence.
+    if (!(await verificationEmailLimit.limit(email.toLowerCase())).success) return { status: 429 };
+    const result = await addUser({ email, password, role: "user" });
+    if (result.status !== 409 && !result.userOutput) return { status: 500 };
+    after(async () => {
+      try {
+        if (result.status === 409) await sendAccountExistsEmail(email);
+        else {
+          const token = await createToken("verify", { userId: result.userOutput!.id!, email });
+          await sendVerificationEmail(email, token);
+        }
+      } catch { console.error("Auth signup email failed: background_error"); }
     });
-    const luciaCookie = lucia.createSessionCookie(session.id);
-    await (await cookies()).set(luciaCookie.name, luciaCookie.value, luciaCookie.attributes);
-    return res;
-  } catch (err: any) {
-    console.log(err);
-    return {
-      userOutput: null,
-      status: 500,
-    };
+    return { status: 202 };
+  } catch {
+    return { status: 500 };
   }
 }

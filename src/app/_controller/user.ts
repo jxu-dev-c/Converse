@@ -1,141 +1,77 @@
-import { UserType } from "../_schema/user";
-import {
-  GetItemCommand,
-  GetItemCommandInput,
-  PutItemCommand,
-  PutItemCommandInput,
-  type PutItemCommandOutput,
-} from "@aws-sdk/client-dynamodb";
+import { UserType, UserOutputType } from "../_schema/user";
+import { PutItemCommand } from "@aws-sdk/client-dynamodb";
+import { GetCommand, DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { DDClient } from "./database";
-import {
-  GetCommand,
-  DynamoDBDocumentClient,
-  QueryCommand,
-} from "@aws-sdk/lib-dynamodb";
 import { uuid } from "../lib/uuid";
-import { stat } from "fs";
-import { sign } from "crypto";
-const bcrypt = require("bcryptjs");
-// import bcrypt from "bcrypt";
-
-const saltRounds = bcrypt.genSaltSync(10);
+const bcrypt: typeof import("bcrypt") = require("bcryptjs");
 
 const docClient = DynamoDBDocumentClient.from(DDClient);
+// A fixed, valid cost-10 hash ensures unknown users still pay for a compare.
+const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
 
-export const addUser = async (
-  user: UserType
-): Promise<{ status: number; userOutput: any }> => {
-  const uuidString = uuid();
-  const inputItemInput: PutItemCommandInput = {
-    Item: {
-      id: {
-        S: uuidString,
-      },
-      email: {
-        S: user.email,
-      },
-      password: {
-        S: await bcrypt.hashSync(user.password, saltRounds),
-      },
-      userName: {
-        S: user.userName || "",
-      },
-      role: {
-        S: user.role,
-      },
-      createAt: {
-        S: new Date().getTime().toString(),
-      },
-    },
-    ConditionExpression: "attribute_not_exists(email)",
-    TableName: process.env.DYNAMODB_TABLE_NAME,
-  };
-  const command = new PutItemCommand(inputItemInput);
-  return await DDClient.send(command)
-    .then((data) => {
-      return {
-        status: (data as PutItemCommandOutput).$metadata
-          .httpStatusCode as number,
-        userOutput: {
-          email: user.email,
-          id: uuidString,
-          role: user.role,
-        },
-      };
-    })
-    .catch((err) => {
-      let statusCode: number;
+export const hashPassword = (password: string) => bcrypt.hash(password, 10);
 
-      if (err.__type?.toString()?.includes("ConditionalCheckFailedException")) {
-        console.log("User already exists");
-        statusCode = 409;
-      } else {
-        statusCode = err.$metadata.httpStatusCode;
-        // console.log("Unable to add item. Error:", err);
-      }
-      console.log("statusCode", statusCode);
-      return {
-        status: statusCode,
-        userOutput: null,
-      };
-    });
-};
+export async function addUser(user: UserType): Promise<{ status: number; userOutput: UserOutputType | null }> {
+  const id = uuid();
+  const passwordHash = await hashPassword(user.password);
+  try {
+    await DDClient.send(new PutItemCommand({
+      TableName: process.env.DYNAMODB_TABLE_NAME,
+      Item: {
+        id: { S: id }, email: { S: user.email }, password: { S: passwordHash },
+        userName: { S: user.userName || "" }, role: { S: user.role },
+        emailVerified: { BOOL: false }, createAt: { S: Date.now().toString() },
+      },
+      ConditionExpression: "attribute_not_exists(email)",
+    }));
+    return { status: 200, userOutput: { id, email: user.email, role: user.role, emailVerified: false } };
+  } catch (error) {
+    const failure = error as { name?: string; __type?: string };
+    const exists = failure.name === "ConditionalCheckFailedException"
+      || failure.__type?.includes("ConditionalCheckFailedException");
+    return { status: exists ? 409 : 500, userOutput: null };
+  }
+}
 
 export const removeUser = async (uuid: string) => {};
 
-export const logIn = async ({ email, password }: UserType) => {
-  // 1. get user by email
-  // 2. compared against hashed Pswd
-  // 3. return result with a session id
-  const command = new GetCommand({
-    TableName: process.env.DYNAMODB_TABLE_NAME,
-    Key: {
-      email: email,
-    },
-  });
-  const response = await docClient.send(command);
-  // console.log("response", response);
-  if (!response?.Item) {
-    return { status: 404, user: null };
+export async function logIn({ email, password }: UserType) {
+  const { Item } = await getUserbyEmail(email);
+  const matches = await bcrypt.compare(password, Item?.password || dummyHash);
+  if (!Item || !matches) {
+    return { status: 401, user: null, error: "Incorrect email or password" };
   }
-  const primaryItem = response?.Item;
-  const passwordHash = primaryItem?.password;
-  delete primaryItem?.password;
-  const isMatch = await bcrypt.compareSync(
-    password,
-    passwordHash as unknown as string
-  );
-  if (!isMatch) {
-    return { status: 401, user: null, error: "Password is incorrect" };
-  } else {
-    return { status: 200, user: primaryItem };
-  }
-};
-
-export const getUserbyEmail = async (email: string) => {
-  const command = new GetCommand({
-    TableName: process.env.DYNAMODB_TABLE_NAME,
-    Key: {
-      email: email,
-    },
-  });
-  const response = await docClient.send(command);
-  return response;
+  const { password: _password, ...user } = Item;
+  return { status: Item.emailVerified === false ? 403 : 200, user: user as UserOutputType & { id: string } };
 }
 
-export const getUserbyId = async (uuid: string) => {
-  const command = new QueryCommand({
+export function getUserbyEmail(email: string) {
+  return docClient.send(new GetCommand({ TableName: process.env.DYNAMODB_TABLE_NAME, Key: { email } }));
+}
+
+export function getUserbyId(id: string) {
+  return docClient.send(new QueryCommand({
     TableName: process.env.DYNAMODB_TABLE_NAME,
-    KeyConditionExpression: "id = :id",
-    ExpressionAttributeValues: {
-      ":id": uuid,
-    },
-    IndexName: "id-index",
-    ProjectionExpression: "email, #role, #id",
-    ExpressionAttributeNames: {
-      "#id": "id",
-      "#role": "role",
-    },
-  });
-  return docClient.send(command);
-};
+    KeyConditionExpression: "id = :id", ExpressionAttributeValues: { ":id": id },
+    IndexName: "id-index", ProjectionExpression: "email, #role, #id",
+    ExpressionAttributeNames: { "#id": "id", "#role": "role" },
+  }));
+}
+
+export function updatePassword(email: string, userId: string, hash: string) {
+  return docClient.send(new UpdateCommand({
+    TableName: process.env.DYNAMODB_TABLE_NAME, Key: { email },
+    UpdateExpression: "SET #password = :hash, emailVerified = :verified",
+    ConditionExpression: "id = :userId",
+    ExpressionAttributeNames: { "#password": "password" },
+    ExpressionAttributeValues: { ":hash": hash, ":verified": true, ":userId": userId },
+  }));
+}
+
+export function markEmailVerified(email: string, userId: string) {
+  return docClient.send(new UpdateCommand({
+    TableName: process.env.DYNAMODB_TABLE_NAME, Key: { email },
+    UpdateExpression: "SET emailVerified = :verified", ConditionExpression: "id = :userId",
+    ExpressionAttributeValues: { ":verified": true, ":userId": userId },
+  }));
+}
