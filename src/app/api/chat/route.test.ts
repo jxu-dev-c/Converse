@@ -179,6 +179,17 @@ it("streams a refusal without model access or any persistence", async () => {
   expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, [], expect.any(Object));
 });
 
+it("fails the request without model access or any persistence when the guardrail is unavailable", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    mocks.offTopic.mockRejectedValue(new Error("Guardrail unavailable: timeout"));
+    const response = await POST(request());
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("Unable to complete the response. Please try again.");
+    for (const mock of [mocks.stream, mocks.query, mocks.save, mocks.touch, mocks.title, mocks.rename, mocks.begin, mocks.subscribe, mocks.get, mocks.stop]) expect(mock).not.toHaveBeenCalled();
+  } finally { log.mockRestore(); }
+});
+
 it("audits retries against only history preceding the edited message and leaves stored history intact when blocked", async () => {
   const history: ChatMessage[] = [
     { id: "earlier", role: "user", parts: [{ type: "text", text: "Earlier question" }] },
