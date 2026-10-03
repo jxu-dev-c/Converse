@@ -32,6 +32,27 @@ it("supports an env override, including zero to disable paid calls", async () =>
   await expect(new WeeklyBudget("user").assertAvailable()).rejects.toBeInstanceOf(WeeklyBudgetExceededError);
 });
 
+it("reports the allowance, usage and remaining amount from the same enforced counter", async () => {
+  vi.stubEnv("AI_WEEKLY_COST_CAP_USD", "2.5");
+  redis.hget.mockResolvedValueOnce(750_000_000);
+  expect(await new WeeklyBudget("user").getSnapshot()).toEqual({
+    limitUsd: 2.5, usedUsd: 0.75, remainingUsd: 1.75, resetsAt: Date.parse("2026-10-05"),
+  });
+  redis.hget.mockResolvedValueOnce(3_000_000_000);
+  expect(await new WeeklyBudget("user").getSnapshot()).toMatchObject({ usedUsd: 3, remainingUsd: 0 });
+});
+
+it("reports zero usage for a new week and still reports when paid calls are disabled", async () => {
+  expect(await new WeeklyBudget("user").getSnapshot()).toMatchObject({ limitUsd: 1, usedUsd: 0, remainingUsd: 1 });
+  vi.stubEnv("AI_WEEKLY_COST_CAP_USD", "0");
+  expect(await new WeeklyBudget("user").getSnapshot()).toMatchObject({ limitUsd: 0, usedUsd: 0, remainingUsd: 0 });
+});
+
+it.each(["invalid", -1, Infinity, 0.5])("rejects invalid stored usage rather than showing a misleading balance: %s", async used => {
+  redis.hget.mockResolvedValueOnce(used);
+  await expect(new WeeklyBudget("user").getSnapshot()).rejects.toBeInstanceOf(BudgetUnavailableError);
+});
+
 it.each(["-1", "NaN", "Infinity", "invalid", "9007199254740992"])("fails closed on invalid configuration %s", value => {
   vi.stubEnv("AI_WEEKLY_COST_CAP_USD", value);
   expect(() => new WeeklyBudget("user")).toThrow(BudgetUnavailableError);

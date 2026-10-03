@@ -10,6 +10,7 @@ import React from "react";
 import { useRouter } from "next/navigation";
 import { startTransition, useActionState } from "react";
 import { SignOut } from "@/app/_action/signOut";
+import WeeklyBudgetMeter from "./WeeklyBudgetMeter";
 
 
 const initialState = {
@@ -20,6 +21,7 @@ const initialState = {
 
 
 export default function NavDropDown() {
+  const [isOpen, setIsOpen] = React.useState(false);
   const [logOutState, formAction] = useActionState(SignOut, initialState);
   const router = useRouter();
 
@@ -37,9 +39,11 @@ export default function NavDropDown() {
 
   return (
     <>
-      <Dropdown size="lg">
+      <Dropdown size="lg" isOpen={isOpen} onOpenChange={setIsOpen}>
         <DropdownTrigger>
           <Avatar
+            as="button"
+            aria-label="Open profile menu"
             showFallback
             name="user"
             size="md"
@@ -48,8 +52,9 @@ export default function NavDropDown() {
         </DropdownTrigger>
         <DropdownMenu
           variant="solid"
-          aria-label="Dropdown menu with icons"
+          aria-label="Profile menu"
           className="text-black dark:text-white"
+          topContent={<WeeklyBudgetMeter isOpen={isOpen} />}
         >
           <DropdownItem
             key={"logout"}
