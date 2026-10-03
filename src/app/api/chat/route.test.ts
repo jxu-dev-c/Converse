@@ -4,15 +4,25 @@ import { simulateReadableStream, type MockLanguageModelV4 } from "ai/test";
 import type { ChatMessage } from "@/app/lib/chat/types";
 import { OFF_TOPIC_REPLY } from "@/app/lib/chat/prompts";
 import { POST } from "./route";
+import { BudgetUnavailableError, WeeklyBudgetExceededError } from "@/app/lib/chat/budget";
 
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(), limit: vi.fn(), load: vi.fn(), save: vi.fn(), clear: vi.fn(),
   offTopic: vi.fn(),
+  budgetCheck: vi.fn(), reserve: vi.fn(), settle: vi.fn(), budgetUser: vi.fn(),
   query: vi.fn(), stream: vi.fn(), touch: vi.fn(), rename: vi.fn(), title: vi.fn(), get: vi.fn(), begin: vi.fn(), subscribe: vi.fn(), unsubscribe: vi.fn(), stop: vi.fn(),
 }));
 vi.mock("@/app/_auth/validate-request", () => ({ validateRequest: mocks.auth }));
 vi.mock("@/app/lib/chat/guardrail", () => ({ isOffTopic: mocks.offTopic }));
 vi.mock("@/app/lib/redis", () => ({ redis: {} }));
+vi.mock("@/app/lib/chat/budget", async importOriginal => ({
+  ...await importOriginal<typeof import("@/app/lib/chat/budget")>(),
+  WeeklyBudget: class {
+    constructor(userId: string) { mocks.budgetUser(userId); }
+    assertAvailable = mocks.budgetCheck;
+    reserve = mocks.reserve;
+  },
+}));
 vi.mock("@upstash/ratelimit", () => ({ Ratelimit: class {
   static slidingWindow() { return {}; }
   limit = mocks.limit;
@@ -28,6 +38,7 @@ vi.mock("@/app/lib/chat/model", async () => {
   return {
     providerOptions: { deepseek: { thinking: { type: "disabled" } } },
     chatModel: new MockLanguageModelV4({
+      modelId: "deepseek-v4-flash",
       doStream: options => mocks.stream(options),
     }),
   };
@@ -65,6 +76,9 @@ beforeEach(() => {
   mocks.limit.mockResolvedValue({ success: true, reset: Date.now() + 10_000 });
   mocks.load.mockResolvedValue([]);
   mocks.offTopic.mockResolvedValue(false);
+  mocks.budgetCheck.mockResolvedValue(undefined);
+  mocks.reserve.mockResolvedValue({ settle: mocks.settle });
+  mocks.settle.mockResolvedValue(undefined);
   mocks.query.mockResolvedValue([{ id: "label-id", score: 0.8, data: "Ibuprofen label evidence" }]);
   mocks.stream.mockImplementation(() => textStream());
   mocks.save.mockResolvedValue(undefined);
@@ -77,6 +91,27 @@ beforeEach(() => {
 });
 
 describe("chat API boundaries", () => {
+  it("blocks the exhausted weekly budget before the audit or persistence", async () => {
+    mocks.budgetCheck.mockRejectedValue(new WeeklyBudgetExceededError(1, Date.now() + 86_400_000));
+    const response = await POST(request());
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("86400");
+    expect(await response.text()).toContain("Weekly AI spending limit reached ($1)");
+    expect(mocks.budgetUser).toHaveBeenCalledWith("stable-user");
+    for (const mock of [mocks.offTopic, mocks.load, mocks.stream, mocks.title, mocks.begin]) expect(mock).not.toHaveBeenCalled();
+  });
+  it("fails closed if the budget cannot be checked", async () => {
+    mocks.budgetCheck.mockRejectedValue(new BudgetUnavailableError());
+    expect((await POST(request())).status).toBe(503);
+    expect(mocks.offTopic).not.toHaveBeenCalled();
+    expect(mocks.stream).not.toHaveBeenCalled();
+  });
+  it("propagates a denied Jev reservation without starting DeepSeek", async () => {
+    mocks.offTopic.mockRejectedValue(new WeeklyBudgetExceededError(1, Date.now() + 1000));
+    expect((await POST(request())).status).toBe(429);
+    expect(mocks.stream).not.toHaveBeenCalled();
+    expect(mocks.touch).not.toHaveBeenCalled();
+  });
   it("rejects a foreign origin before auth or provider access", async () => {
     expect((await POST(request(undefined, "https://foreign.example"))).status).toBe(403);
     expect(mocks.auth).not.toHaveBeenCalled();
@@ -141,7 +176,7 @@ it("streams a refusal without model access or any persistence", async () => {
   ]);
   expect(new Set(chunks.slice(1, 4).map(chunk => chunk.id)).size).toBe(1);
   for (const mock of [mocks.stream, mocks.query, mocks.save, mocks.touch, mocks.title, mocks.rename, mocks.begin, mocks.subscribe, mocks.get, mocks.stop]) expect(mock).not.toHaveBeenCalled();
-  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, []);
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, [], expect.any(Object));
 });
 
 it("audits retries against only history preceding the edited message and leaves stored history intact when blocked", async () => {
@@ -154,7 +189,7 @@ it("audits retries against only history preceding the edited message and leaves 
   mocks.load.mockResolvedValue(history);
   mocks.offTopic.mockResolvedValue(true);
   await (await POST(request())).text();
-  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history.slice(0, 2));
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history.slice(0, 2), expect.any(Object));
   expect(history).toHaveLength(4);
   expect(mocks.save).not.toHaveBeenCalled();
 });
@@ -165,7 +200,7 @@ it("loads freshly persisted partial output after stopping a previous producer", 
   mocks.get.mockResolvedValue({ meta: { activeStreamId: "old" } });
   mocks.load.mockResolvedValueOnce(history).mockResolvedValueOnce([...history, partial]);
   await (await POST(request())).text();
-  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history);
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history, expect.any(Object));
   expect(mocks.save.mock.calls[0][1].slice(0, 3)).toEqual([...history, partial, question]);
   expect(mocks.stop).toHaveBeenCalledBefore(mocks.begin);
 });
@@ -176,7 +211,7 @@ it("preserves a previous answer that finishes during the audit", async () => {
   mocks.load.mockResolvedValue(history);
   mocks.get.mockResolvedValue({ meta: {}, messages: [...history, finished] });
   await (await POST(request())).text();
-  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history);
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history, expect.any(Object));
   expect(mocks.save.mock.calls[0][1].slice(0, 3)).toEqual([...history, finished, question]);
   expect(mocks.stop).not.toHaveBeenCalled();
 });
@@ -189,7 +224,7 @@ it("streams without searching when the model does not call the tool", async () =
   mocks.load.mockResolvedValue(history);
   const response = await POST(request());
   expect(response.status).toBe(200);
-  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history);
+  expect(mocks.offTopic).toHaveBeenCalledExactlyOnceWith(question, history, expect.any(Object));
   expect(response.headers.get("x-vercel-ai-ui-message-stream")).toBe("v1");
   expect(await response.text()).toContain("Ibuprofen ");
   const [userId, messages, chatId] = mocks.save.mock.calls[0] as [string, ChatMessage[], string];
@@ -256,9 +291,38 @@ it("reserves a final answer step after three search rounds", async () => {
   expect(await (await POST(request())).text()).toContain("Ibuprofen ");
   expect(mocks.query).toHaveBeenCalledTimes(3);
   expect(mocks.stream).toHaveBeenCalledTimes(4);
+  expect(mocks.reserve).toHaveBeenCalledTimes(4);
+  expect(mocks.settle).toHaveBeenCalledTimes(4);
   const lastCall = mocks.stream.mock.calls[3][0];
   expect(lastCall.toolChoice).toEqual({ type: "none" });
   expect(lastCall.tools).toBeUndefined();
+});
+
+it("halts the tool loop when the next model call cannot fit the budget", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    mocks.stream.mockResolvedValueOnce(searchStream("ibuprofen uses"));
+    mocks.reserve.mockRejectedValueOnce(new WeeklyBudgetExceededError(1, Date.now() + 1000));
+    const body = await (await POST(request())).text();
+    expect(body).toContain("Weekly AI spending limit reached");
+    expect(mocks.stream).not.toHaveBeenCalled();
+    expect(mocks.query).not.toHaveBeenCalled();
+    expect(mocks.save).toHaveBeenCalledOnce();
+  } finally { log.mockRestore(); }
+});
+
+it("charges a completed tool step and blocks a subsequent unaffordable step", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    mocks.stream.mockResolvedValueOnce(searchStream("ibuprofen uses"));
+    mocks.reserve.mockResolvedValueOnce({ settle: mocks.settle }).mockRejectedValueOnce(new WeeklyBudgetExceededError(1, Date.now() + 1000));
+    const body = await (await POST(request())).text();
+    expect(body).toContain("tool-output-available");
+    expect(body).toContain("Weekly AI spending limit reached");
+    expect(mocks.stream).toHaveBeenCalledOnce();
+    expect(mocks.settle).toHaveBeenCalledOnce();
+    expect(mocks.reserve).toHaveBeenCalledTimes(2);
+  } finally { log.mockRestore(); }
 });
 
 it.each(["", "x".repeat(3001)])("does not execute invalid model tool inputs %#", async query => {
@@ -307,6 +371,7 @@ it("finishes and persists the response independently when the client disconnects
   expect(messages[0]).toEqual(question);
   const text = messages.at(-1)!.parts.filter(part => part.type === "text").map(part => part.text).join("");
   expect(text).toBe("Ibuprofen relieves pain.");
+  expect(mocks.settle).toHaveBeenCalledTimes(2); // search + answer, even after disconnect
   expect(messages.at(-1)!.metadata).toEqual({ reasoningMs: 0 });
 });
 
@@ -325,13 +390,17 @@ it("aborts on a server stop signal and saves the partial before a newer stream",
   const messages = mocks.save.mock.calls[0][1] as ChatMessage[];
   expect(messages.at(-1)?.parts.filter(part => part.type === "text").map(part => part.text).join("")).toBe("Ibuprofen ");
   expect(mocks.unsubscribe).toHaveBeenCalled();
+  expect(mocks.reserve).toHaveBeenCalledOnce();
+  expect(mocks.settle).not.toHaveBeenCalled(); // incomplete usage keeps the hold
 });
 it("waits for a previous producer and rejects a concurrent claim", async () => {
   mocks.get.mockResolvedValue({ meta: { activeStreamId: "old" } });
   mocks.begin.mockResolvedValue(false);
+  mocks.touch.mockResolvedValue(true);
   expect((await POST(request())).status).toBe(409);
   expect(mocks.stop).toHaveBeenCalledWith("stable-user", "default", "old");
   expect(mocks.stream).not.toHaveBeenCalled();
+  expect(mocks.title).not.toHaveBeenCalled();
 });
 
 it("accepts any valid chat ID and emits a transient title only for the first message", async () => {
