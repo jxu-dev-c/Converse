@@ -13,7 +13,7 @@ const budget = { reserve } as unknown as WeeklyBudget;
 const answer = (medical: number, small_talk: number, off_topic: number) => ({
   answers: { scope: { type: "choice", probabilities: { medical, small_talk, off_topic } } },
 });
-let warn: ReturnType<typeof vi.spyOn>;
+let logError: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   vi.stubEnv("OPENROUTER_API_KEY", "private-test-key");
   vi.stubEnv("JEV_MODEL", "");
@@ -22,7 +22,7 @@ beforeEach(() => {
   fetchMock.mockResolvedValue(Response.json(answer(1, 0, 0)));
   reserve.mockReset().mockResolvedValue({ settle });
   settle.mockReset().mockResolvedValue(undefined);
-  warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  logError = vi.spyOn(console, "error").mockImplementation(() => {});
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
@@ -49,7 +49,7 @@ it("sends joined text and a bounded previous turn without tools or reasoning", a
   expect(options.body).not.toContain("private query");
   expect(options.body).not.toContain("private reasoning");
   expect(timeout).toHaveBeenCalledExactlyOnceWith(3000);
-  expect(warn).not.toHaveBeenCalled();
+  expect(logError).not.toHaveBeenCalled();
 });
 
 it("supports a model override and empty history", async () => {
@@ -67,11 +67,11 @@ it.each([
 ] as const)("applies the probability threshold for %s", async (_label, probabilities, blocked) => {
   fetchMock.mockResolvedValue(Response.json(answer(probabilities[0], probabilities[1], probabilities[2])));
   expect(await isOffTopic(message, [], budget)).toBe(blocked);
-  expect(warn).not.toHaveBeenCalled();
+  expect(logError).not.toHaveBeenCalled();
 });
 
-describe("fail open without content logging or retries", () => {
-  it.each(["missing_key", "http_500", "timeout", "abort", "json", "schema", "network", "range", "wrong_type"])("allows on %s with one reason-only warning", async failure => {
+describe("fail closed without content logging or retries", () => {
+  it.each(["missing_key", "http_500", "timeout", "abort", "json", "schema", "network", "range", "wrong_type"])("rejects on %s with one reason-only error log", async failure => {
     if (failure === "missing_key") vi.stubEnv("OPENROUTER_API_KEY", "");
     if (failure === "http_500") fetchMock.mockResolvedValue(new Response("private provider error", { status: 500 }));
     if (failure === "timeout" || failure === "abort") fetchMock.mockRejectedValue(new DOMException("private incoming question", failure === "timeout" ? "TimeoutError" : "AbortError"));
@@ -80,18 +80,18 @@ describe("fail open without content logging or retries", () => {
     if (failure === "network") fetchMock.mockRejectedValue(new Error("private-test-key private incoming question"));
     if (failure === "range") fetchMock.mockResolvedValue(Response.json(answer(0, 0, 1.1)));
     if (failure === "wrong_type") fetchMock.mockResolvedValue(Response.json({ answers: { scope: { ...answer(0, 0, 1).answers.scope, type: "score" } } }));
-    expect(await isOffTopic(message, [], budget)).toBe(false);
+    await expect(isOffTopic(message, [], budget)).rejects.toThrow("Guardrail unavailable");
     const reason = failure === "abort" ? "timeout" : ["missing_key", "http_500", "timeout"].includes(failure) ? failure : "invalid_response";
-    expect(warn).toHaveBeenCalledExactlyOnceWith("Guardrail unavailable; allowing message", { reason });
+    expect(logError).toHaveBeenCalledExactlyOnceWith("Guardrail unavailable; rejecting message", { reason });
     expect(fetchMock).toHaveBeenCalledTimes(failure === "missing_key" ? 0 : 1);
   });
 });
 
 it("charges OpenRouter's reported fee for a refused or malformed audit", async () => {
-  for (const response of [answer(0, 0, 1), { answers: {} }]) {
-    fetchMock.mockResolvedValue(Response.json({ ...response, usage: { cost: 0.000042 } }));
-    await isOffTopic(message, [], budget);
-  }
+  fetchMock.mockResolvedValueOnce(Response.json({ ...answer(0, 0, 1), usage: { cost: 0.000042 } }));
+  expect(await isOffTopic(message, [], budget)).toBe(true);
+  fetchMock.mockResolvedValueOnce(Response.json({ answers: {}, usage: { cost: 0.000042 } }));
+  await expect(isOffTopic(message, [], budget)).rejects.toThrow("Guardrail unavailable");
   expect(reserve).toHaveBeenCalledWith(0.002);
   expect(settle).toHaveBeenNthCalledWith(1, 0.000042);
   expect(settle).toHaveBeenNthCalledWith(2, 0.000042);
@@ -99,7 +99,7 @@ it("charges OpenRouter's reported fee for a refused or malformed audit", async (
 
 it("retains the reservation when an audit times out or has no cost", async () => {
   fetchMock.mockRejectedValueOnce(new DOMException("timeout", "TimeoutError"));
-  await isOffTopic(message, [], budget);
+  await expect(isOffTopic(message, [], budget)).rejects.toThrow("Guardrail unavailable");
   expect(settle).not.toHaveBeenCalled();
   await isOffTopic(message, [], budget);
   expect(settle).toHaveBeenCalledWith(undefined);
@@ -107,15 +107,15 @@ it("retains the reservation when an audit times out or has no cost", async () =>
 
 it("does not reserve or call OpenRouter without a key", async () => {
   vi.stubEnv("OPENROUTER_API_KEY", "");
-  await isOffTopic(message, [], budget);
+  await expect(isOffTopic(message, [], budget)).rejects.toThrow("Guardrail unavailable");
   expect(reserve).not.toHaveBeenCalled();
 });
 
-it.each([new WeeklyBudgetExceededError(1, Date.now() + 1000), new BudgetUnavailableError()])("never fails open on a budget error: %s", async error => {
+it.each([new WeeklyBudgetExceededError(1, Date.now() + 1000), new BudgetUnavailableError()])("propagates a budget error unchanged: %s", async error => {
   reserve.mockRejectedValueOnce(error);
   await expect(isOffTopic(message, [], budget)).rejects.toBe(error);
   expect(fetchMock).not.toHaveBeenCalled();
-  expect(warn).not.toHaveBeenCalled();
+  expect(logError).not.toHaveBeenCalled();
   settle.mockRejectedValueOnce(error);
   await expect(isOffTopic(message, [], budget)).rejects.toBe(error);
 });
