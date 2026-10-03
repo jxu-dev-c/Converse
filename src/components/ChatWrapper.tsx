@@ -20,6 +20,7 @@ export const ChatWrapper = ({ chatId, initialMessages, resume = false }: { chatI
     onData: part => { if (part.type === "data-title") upsert({ id: chatId, title: part.data.title }); },
   });
   const busy = status === "submitted" || status === "streaming";
+  const spendingError = error?.message.startsWith("Weekly AI spending limit") || error?.message.startsWith("AI spending limits are temporarily unavailable");
   useEffect(() => { if (messages.length) upsert({ id: chatId, activeStreamId: busy ? "active" : undefined }); }, [busy, chatId, messages.length, upsert]);
   function send(text: string, messageId?: string) {
     if (busy || !text.trim()) return;
@@ -41,7 +42,7 @@ export const ChatWrapper = ({ chatId, initialMessages, resume = false }: { chatI
     <Messages messages={messages} status={status} onSuggest={send} onEdit={send} onRegenerate={() => { clearError(); void regenerate(); }} />
     <div className="shrink-0 bg-gray-100/90 dark:bg-zinc-800/90">
       {stopError && <p role="alert" className="mx-auto max-w-3xl px-4 text-sm text-red-600">{stopError}</p>}
-      {error && <div role="alert" className="mx-auto flex max-w-3xl items-center justify-between px-4 text-sm text-red-600"><span>{error.message.includes("Too many requests") || error.message.includes("429") ? "You're sending messages too quickly." : "Unable to send your message. Please try again."}</span><button onClick={() => { clearError(); void regenerate(); }} disabled={busy} className="rounded border px-3 py-1">Retry</button></div>}
+      {error && <div role="alert" className="mx-auto flex max-w-3xl items-center justify-between px-4 text-sm text-red-600"><span>{spendingError ? error.message : error.message.includes("Too many requests") || error.message.includes("429") ? "You're sending messages too quickly." : "Unable to send your message. Please try again."}</span>{!spendingError && <button onClick={() => { clearError(); void regenerate(); }} disabled={busy} className="rounded border px-3 py-1">Retry</button>}</div>}
       <ChatInput chatState={busy ? "Loading" : "Ready"} input={input} onInputChange={event => setInput(event.target.value)} onSubmit={submit} onStop={() => { void stopReply(); }} />
     </div>
   </div>;

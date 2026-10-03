@@ -5,6 +5,7 @@ import { isOffTopic } from "@/app/lib/chat/guardrail";
 import { OFF_TOPIC_REPLY } from "@/app/lib/chat/prompts";
 import { createCitationRegistry } from "@/app/lib/chat/citations";
 import { converseAgent } from "@/app/lib/chat/agent";
+import { BudgetUnavailableError, WeeklyBudget, WeeklyBudgetExceededError } from "@/app/lib/chat/budget";
 import { beginStream, getChat, loadChat, saveChatIfActive, touchChat, renameChat } from "@/app/lib/chat/store";
 import { batchSse, stopActiveStream, streamContext, subscribe } from "@/app/lib/chat/stream";
 import { chatRequestSchema, messageMetadataSchema, type ChatMessage } from "@/app/lib/chat/types";
@@ -16,6 +17,7 @@ import { type NextRequest } from "next/server";
 export const maxDuration = 60;
 const genericError = "Unable to complete the response. Please try again.";
 const messageId = createIdGenerator({ prefix: "msg", size: 16 });
+const streamError = (error: unknown) => error instanceof WeeklyBudgetExceededError || error instanceof BudgetUnavailableError ? error.message : genericError;
 
 function refusalResponse() {
   return createUIMessageStreamResponse({
@@ -45,16 +47,17 @@ export async function POST(req: NextRequest) {
   let merged: ChatMessage[] = [];
   let claimed = false;
   try {
+    const budget = new WeeklyBudget(user.id);
+    await budget.assertAvailable();
     const history = await loadChat(user.id, id);
     let incoming = mergeIncoming(history, message);
-    if (await isOffTopic(message, incoming.slice(0, -1))) return refusalResponse();
+    if (await isOffTopic(message, incoming.slice(0, -1), budget)) return refusalResponse();
     const chat = await getChat(user.id, id);
     const previous = chat?.meta.activeStreamId;
     if (previous && !await stopActiveStream(user.id, id, previous)) return new Response("Previous reply is still stopping. Please retry.", { status: 409 });
     // The previous producer may finish during the audit, or persist partial output on stop.
     incoming = mergeIncoming(previous ? await loadChat(user.id, id) : chat?.messages ?? history, message);
     const isNew = await touchChat(user.id, id);
-    const title = isNew ? generateTitle(message.parts.map(part => part.text).join(""), controller.signal) : undefined;
     const tools = converseAgent.tools;
     merged = await validateUIMessages<ChatMessage>({
       messages: incoming, metadataSchema: messageMetadataSchema.optional(), tools,
@@ -62,6 +65,7 @@ export async function POST(req: NextRequest) {
     unsubscribe = await subscribe(`converse:stop:${streamId}`, () => controller.abort());
     claimed = await beginStream(user.id, id, streamId, merged);
     if (!claimed) { await unsubscribe(); return new Response("Chat is already streaming. Please retry.", { status: 409 }); }
+    const title = isNew ? generateTitle(message.parts.map(part => part.text).join(""), budget, controller.signal) : undefined;
     const reasoningStarts = new Map<string, number>();
     let reasoningMs = 0;
     const stream = createUIMessageStream<ChatMessage>({
@@ -69,7 +73,7 @@ export async function POST(req: NextRequest) {
       execute: async ({ writer }) => {
         const result = await converseAgent.stream({
           messages: await convertToModelMessages(prepareHistory(merged), { tools, ignoreIncompleteToolCalls: true }),
-          options: { registry: createCitationRegistry(merged) },
+          options: { registry: createCitationRegistry(merged), budget },
           abortSignal: AbortSignal.any([controller.signal, AbortSignal.timeout(110_000)]),
         });
         writer.merge(toUIMessageStream({
@@ -85,7 +89,7 @@ export async function POST(req: NextRequest) {
               reasoningStarts.clear();
             }
             return ["start", "reasoning-end", "finish", "abort"].includes(part.type) ? { reasoningMs } : undefined;
-          }, onError: () => genericError,
+          }, onError: streamError,
         }));
         if (title) {
           const value = await title;
@@ -96,7 +100,7 @@ export async function POST(req: NextRequest) {
       onEnd: async ({ messages }) => {
         try { await saveChatIfActive(user.id, id, streamId, messages); }
         finally { await unsubscribe?.(); }
-      }, onError: () => genericError,
+      }, onError: streamError,
     });
     let registration: Promise<void> | undefined;
     const response = createUIMessageStreamResponse({ stream,
@@ -108,10 +112,14 @@ export async function POST(req: NextRequest) {
     });
     await registration;
     return response;
-  } catch {
+  } catch (error) {
     controller.abort();
     await unsubscribe?.().catch(() => {});
     if (claimed) await saveChatIfActive(user.id, id, streamId, merged).catch(() => {});
+    if (error instanceof WeeklyBudgetExceededError) return new Response(error.message, {
+      status: 429, headers: { "Retry-After": String(Math.max(1, Math.ceil((error.resetsAt - Date.now()) / 1000))) },
+    });
+    if (error instanceof BudgetUnavailableError) return new Response(error.message, { status: 503 });
     console.error("Chat request failed");
     return new Response(genericError, { status: 500 });
   }

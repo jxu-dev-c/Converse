@@ -4,14 +4,16 @@ import { INSTRUCTIONS } from "./prompts";
 import { z } from "zod";
 import { createCitationRegistry, type CitationRegistry } from "./citations";
 import { createSearchTools, searchOutputSchema } from "./retrieval";
+import { costedModel } from "./cost";
+import type { WeeklyBudget } from "./budget";
 
 export const converseAgent = new ToolLoopAgent({
-  callOptionsSchema: z.object({ registry: z.custom<CitationRegistry>() }),
+  callOptionsSchema: z.object({ registry: z.custom<CitationRegistry>(), budget: z.custom<WeeklyBudget>() }),
   toolsContext: { searchDrugLabels: createCitationRegistry([]) },
   model: chatModel, instructions: INSTRUCTIONS, tools: createSearchTools(), toolChoice: "auto",
   stopWhen: isStepCount(4),
   prepareStep: ({ stepNumber }) => stepNumber >= 3 ? { toolChoice: "none", activeTools: [] } : undefined,
-  maxOutputTokens: 4096, providerOptions,
+  maxOutputTokens: 4096, maxRetries: 0, providerOptions,
   onToolExecutionEnd: ({ toolCall, toolOutput }) => {
     if (process.env.NODE_ENV === "development" && toolOutput.type === "tool-result") {
       const output = searchOutputSchema.parse(toolOutput.output);
@@ -23,5 +25,5 @@ export const converseAgent = new ToolLoopAgent({
       promptCacheHitTokens: providerMetadata?.deepseek?.promptCacheHitTokens,
     });
   },
-  prepareCall: settings => ({ ...settings, toolsContext: { searchDrugLabels: settings.options.registry }, onError: () => console.error("Chat generation failed") }),
+  prepareCall: settings => ({ ...settings, model: costedModel(chatModel, settings.options.budget), toolsContext: { searchDrugLabels: settings.options.registry }, onError: () => console.error("Chat generation failed") }),
 });

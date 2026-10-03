@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { ChatMessage } from "./types";
+import type { WeeklyBudget } from "./budget";
+import { jevReservationUsd, reportedJevCost } from "./cost";
 
 const OFF_TOPIC_THRESHOLD = 0.5;
 const probability = z.number().min(0).max(1);
@@ -26,9 +28,12 @@ function allow(reason: string): false {
   return false;
 }
 
-export async function isOffTopic(message: ChatMessage, history: ChatMessage[]): Promise<boolean> {
+export async function isOffTopic(message: ChatMessage, history: ChatMessage[], budget: WeeklyBudget): Promise<boolean> {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) return allow("missing_key");
+  // Budget errors must propagate; they must never trigger the audit's fail-open path.
+  const reservation = await budget.reserve(jevReservationUsd());
+  let raw: unknown;
   try {
     const response = await fetch("https://openrouter.ai/api/v1/systemone", {
       method: "POST",
@@ -47,10 +52,13 @@ export async function isOffTopic(message: ChatMessage, history: ChatMessage[]): 
       signal: AbortSignal.timeout(3000),
     });
     if (!response.ok) return allow(`http_${response.status}`);
-    const result = responseSchema.safeParse(await response.json());
-    if (!result.success) return allow("invalid_response");
-    return result.data.answers.scope.probabilities.off_topic >= OFF_TOPIC_THRESHOLD;
+    raw = await response.json();
   } catch (error) {
     return allow(error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "timeout" : "invalid_response");
   }
+  // Charge the audit even when it refuses a message or returns an invalid answer.
+  await reservation.settle(reportedJevCost(raw));
+  const result = responseSchema.safeParse(raw);
+  if (!result.success) return allow("invalid_response");
+  return result.data.answers.scope.probabilities.off_topic >= OFF_TOPIC_THRESHOLD;
 }

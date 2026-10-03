@@ -25,6 +25,12 @@ Fill in `.env.local` with a DeepSeek API key, the existing Upstash credentials, 
 
 `DEEPSEEK_MODEL` is optional and defaults to `deepseek-v4-flash`. Set `OPENROUTER_API_KEY` for the Jev input guardrail; optional `JEV_MODEL` defaults to `jev-1.13`. `TOGETHER_AI_API_KEY` and `QSTASH_TOKEN` are no longer used. See [.env.example](.env.example) for all variable names.
 
+`AI_WEEKLY_COST_CAP_USD` defaults to `1` ($1 per authenticated user per calendar week) and accepts a nonnegative USD amount. `0` blocks paid AI calls. Weeks reset Monday at 00:00 UTC. The cap is shared across all of a user's chats, including edits/regenerations, Jev audits (even refusals), every DeepSeek tool round, and generated titles. Existing history, resume, Stop, rename and deletion remain available after the cap is reached. Accounting starts when this feature is deployed; earlier calls are not backfilled.
+
+Costs use [TokenLens](https://github.com/xn1cklas/tokenlens) (`@tokenlens/helpers`) for DeepSeek, counting cached input separately and reasoning within the output total. Default Flash and V4 Pro prices use conservative **peak** rates from [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/) verified on 2026-10-02; off-peak calls can therefore consume budget faster than their invoice cost. Override `DEEPSEEK_INPUT_USD_PER_MILLION`, `DEEPSEEK_CACHED_INPUT_USD_PER_MILLION`, and `DEEPSEEK_OUTPUT_USD_PER_MILLION` for changed prices or a different model. Unrecognized DeepSeek models require all three rates and otherwise block generation. Jev uses OpenRouter's reported `usage.cost`; its pre-call reservation is `$0.002`, configurable via `JEV_REQUEST_RESERVE_USD` for more expensive models. Defaults cover the current Jev 1.13 price/context limit. Prices and reservation bounds must be kept current with the providers.
+
+Redis Lua atomically reserves each call's conservative maximum against a user/week key (`converse:ai-budget:{userId}:{weekStartMs}`), then reconciles confirmed usage before the next tool round. DeepSeek reservations use UTF-8 prompt/tool bytes plus template padding and the output token limit. Calls are rejected if the maximum cannot fit the remaining allowance, so the last small balance may be unusable. Missing usage, failed calls, cancellation and process crashes retain the maximum reservation until the weekly reset; automatic DeepSeek retries are disabled. Redis/configuration errors block paid calls. Settlements keep their original week across a reset and are idempotent. Budget keys expire one week after their reset. Chat deletion does not erase costs.
+
 Set `MAINTENANCE_MODE=off` locally, then:
 
 ```bash
@@ -51,7 +57,7 @@ For Vercel, add `DEEPSEEK_API_KEY` and `OPENROUTER_API_KEY`, optionally set `DEE
 
 ## Conversation flow
 
-The client sends only `{ id, message }` to `POST /api/chat`. The server authenticates the user, rate-limits that user (10 requests per 10 seconds), loads their stored conversation, and merges the incoming message by ID. Retrying a stored question truncates that question and later messages before appending it again.
+The client sends only `{ id, message }` to `POST /api/chat`. The server authenticates the user, rate-limits that user (10 requests per 10 seconds), checks their weekly AI budget before any audit, loads their stored conversation, and merges the incoming message by ID. Exhausted budgets return HTTP 429 with `Retry-After` until the next reset; unavailable budgets return 503. A budget denial during an agent loop produces a streamed error and persists completed work. Retrying a stored question truncates that question and later messages before appending it again.
 
 Guardrail: before storing the incoming message or sending it to DeepSeek (including title generation), Jev audits it through [OpenRouter's System One API](https://openrouter.ai/docs/guides/community/typesafe-sdk). Medical questions and small talk pass. The last user/assistant text provides bounded context for follow-ups; tool outputs are excluded. An `off_topic` probability >=0.5 returns a fixed streamed refusal, and neither the question nor refusal is persisted. Missing credentials, HTTP errors, timeouts (3 seconds, no retries), and invalid responses fail open with reason-only warnings that contain no message text or credentials.
 
@@ -80,6 +86,8 @@ npm run build
 ```
 
 Vitest covers auth token hashing/expiry/single use, generic auth responses, verification, password reset validation/session invalidation, and history merging/windowing including tool evidence, model-controlled search with the AI SDK mock model, retrieval filtering and failures, persisted tool validation, search round limits, storage retention, and API behavior.
+
+Weekly budget tests cover provider accounting, env validation, reset boundaries, budget errors and stopping the paid tool loop. To additionally run the Lua scripts against a real local Redis, set `TEST_REDIS_SERVER` and `TEST_REDIS_CLI` to the executable paths and run `npm test`. Those tests start an isolated Redis on a temporary Unix socket with persistence disabled and verify concurrent reservations, idempotent settlement and rollover; they never use the application's Redis credentials.
 
 Live verification uses the existing test login with `MAINTENANCE_MODE=off`. Back up its Redis state first and restore it afterward. Check legacy history, citations and ref reuse, reasoning, reload/second-tab resume, Stop persistence, concurrent chats, edit/regenerate/copy, rename/delete, composer and scroll behavior. Repeat at desktop and 375px widths in both themes. Inspect Redis and dev logs; verify HTTP 401/403/429 and the default 503 gate.
 
